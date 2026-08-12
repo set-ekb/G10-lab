@@ -72,6 +72,7 @@ public class MainActivity extends Activity {
     private TextView rawText;
     private TextView motionText;
     private TextView cruiseText;
+    private TextView cruiseEnabledText;
     private TextView brakeText;
     private TextView modeText;
     private TextView packetText;
@@ -126,17 +127,17 @@ public class MainActivity extends Activity {
         scroll.addView(root);
 
         TextView title = new TextView(this);
-        title.setText("G10 BLE Lab v0.3.3 — Cruise Probe");
+        title.setText("G10 BLE Lab v0.3.4 — Cruise Query");
         title.setTextSize(22);
         title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         root.addView(title);
 
         TextView warning = new TextView(this);
         warning.setText(
-                "CRUISE PROBE: приложение читает FFF2 и может отправлять только команды режима " +
-                "ECO = F0 4C 03 01, SPORT = F0 4C 03 02 и RACE = F0 4C 03 03. " +
-                "Команды разрешены только при подтверждённой скорости 0 км/ч. " +
-                "Управление Cruise, LOCK/UNLOCK, Zero Start и OTA не отправляется."
+                "CRUISE QUERY: приложение читает FFF2, управляет только режимами ECO/SPORT/RACE " +
+                "и по отдельной кнопке отправляет диагностический запрос Cruise F0 4D 13. " +
+                "Запрос и команды режима разрешены только при скорости 0 км/ч. " +
+                "Команды включения/выключения Cruise, LOCK/UNLOCK, Zero Start и OTA не отправляются."
         );
         warning.setTextSize(12);
         warning.setPadding(0, dp(8), 0, dp(12));
@@ -196,6 +197,25 @@ public class MainActivity extends Activity {
         protocolHint.setPadding(0, 0, 0, dp(6));
         root.addView(protocolHint, fullWidth());
 
+        Button queryCruiseButton = new Button(this);
+        queryCruiseButton.setText("QUERY CRUISE — F0 4D 13");
+        queryCruiseButton.setOnClickListener(v ->
+                sendRideModeCommand(
+                        new byte[]{(byte) 0xF0, (byte) 0x4D, (byte) 0x13},
+                        "QUERY_CRUISE"
+                )
+        );
+        root.addView(queryCruiseButton, fullWidth());
+
+        TextView queryHint = new TextView(this);
+        queryHint.setText(
+                "Диагностический запрос состояния. Ожидаемый ответ Neoline: " +
+                "F1 13 .. 01 = разрешён, F1 13 .. 00 = запрещён."
+        );
+        queryHint.setTextSize(12);
+        queryHint.setPadding(0, 0, 0, dp(8));
+        root.addView(queryHint, fullWidth());
+
         speedText = field(root, "Скорость: — км/ч", 38, true);
         speedText.setGravity(Gravity.CENTER_HORIZONTAL);
         speedText.setPadding(0, dp(14), 0, dp(6));
@@ -205,6 +225,7 @@ public class MainActivity extends Activity {
         rawText = field(root, "RAW speed: —   byte[12]: —", 14, false);
         motionText = field(root, "Движение: —", 18, true);
         cruiseText = field(root, "Круиз активен: —", 18, true);
+        cruiseEnabledText = field(root, "Круиз разрешён: НЕИЗВЕСТНО", 18, true);
         brakeText = field(root, "Тормоз: —", 18, true);
         modeText = field(root, "Метка режима: —", 16, true);
         packetText = field(root, "Пакетов: 0", 14, false);
@@ -696,6 +717,37 @@ public class MainActivity extends Activity {
     }
 
     private void handleFff2(byte[] packet) {
+        if (packet.length >= 4 &&
+                u8(packet[0]) == 0xF1 &&
+                u8(packet[1]) == 0x13) {
+
+            boolean cruiseEnabled = u8(packet[3]) == 0x01;
+            String hex = toHex(packet);
+
+            appendCsv(
+                    "PROTOCOL_RX",
+                    UUID_FFF2.toString(),
+                    packet.length,
+                    "",
+                    currentMarker,
+                    hex,
+                    "CRUISE_CONFIG_RESPONSE;enabled=" + cruiseEnabled +
+                            ";stateByte=" + u8(packet[3])
+            );
+
+            runOnUiThread(() -> {
+                cruiseEnabledText.setText(
+                        "Круиз разрешён: " + (cruiseEnabled ? "ДА" : "НЕТ")
+                );
+                Toast.makeText(
+                        this,
+                        "Ответ Cruise: " + (cruiseEnabled ? "РАЗРЕШЁН" : "ЗАПРЕЩЁН"),
+                        Toast.LENGTH_LONG
+                ).show();
+            });
+            return;
+        }
+
         if (packet.length < 20) {
             appendCsv("FFF2_NOTIFY", UUID_FFF2.toString(), packet.length,
                     "", currentMarker, toHex(packet), "short_packet");
@@ -840,6 +892,7 @@ public class MainActivity extends Activity {
         rawText.setText("RAW speed: —   byte[12]: —");
         motionText.setText("Движение: —");
         cruiseText.setText("Круиз активен: —");
+        cruiseEnabledText.setText("Круиз разрешён: НЕИЗВЕСТНО");
         brakeText.setText("Тормоз: —");
         modeText.setText("Метка режима: —");
         packetText.setText("Пакетов: 0");
