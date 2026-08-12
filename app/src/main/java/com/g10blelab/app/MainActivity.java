@@ -68,6 +68,7 @@ public class MainActivity extends Activity {
 
     private TextView statusText;
     private TextView speedText;
+    private TextView batteryText;
     private TextView rawText;
     private TextView motionText;
     private TextView cruiseText;
@@ -78,6 +79,9 @@ public class MainActivity extends Activity {
     private Button scanButton;
 
     private long packetCount = 0;
+    private boolean hasTelemetry = false;
+    private int currentSpeedKmh = -1;
+    private boolean currentMoving = false;
     private byte[] previousPacket;
 
     private final List<String> csvRows = new ArrayList<>();
@@ -122,16 +126,17 @@ public class MainActivity extends Activity {
         scroll.addView(root);
 
         TextView title = new TextView(this);
-        title.setText("G10 BLE Lab v0.3.1 — Protocol Lab");
+        title.setText("G10 BLE Lab v0.3.2 — Mode Test");
         title.setTextSize(22);
         title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         root.addView(title);
 
         TextView warning = new TextView(this);
         warning.setText(
-                "PROTOCOL LAB: приложение пассивно читает FFF2 и по нажатию кнопки " +
-                "отправляет в FFF1 только один диагностический запрос режима F0 4D 11. " +
-                "LOCK/UNLOCK, смена режима, Zero Start, Cruise и OTA-команды не отправляются."
+                "MODE TEST: приложение читает FFF2 и может отправить только две тестовые команды режима: " +
+                "SPORT = F0 4C 03 02 и ECO = F0 4C 03 01. " +
+                "Команды разрешены только при подтверждённой скорости 0 км/ч. " +
+                "LOCK/UNLOCK, RACE, Zero Start, Cruise и OTA не отправляются."
         );
         warning.setTextSize(12);
         warning.setPadding(0, dp(8), 0, dp(12));
@@ -143,13 +148,40 @@ public class MainActivity extends Activity {
         scanButton.setText("НАЙТИ И ПОДКЛЮЧИТЬ G10");
         root.addView(scanButton, fullWidth());
 
-        Button queryModeButton = new Button(this);
-        queryModeButton.setText("PROTOCOL LAB: ЗАПРОСИТЬ РЕЖИМ");
-        queryModeButton.setOnClickListener(v -> sendModeQuery());
-        root.addView(queryModeButton, fullWidth());
+        TextView protocolTitle = new TextView(this);
+        protocolTitle.setText("MODE TEST — только на стоящем самокате");
+        protocolTitle.setTextSize(14);
+        protocolTitle.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        protocolTitle.setPadding(0, dp(8), 0, dp(3));
+        root.addView(protocolTitle, fullWidth());
+
+        LinearLayout modeTestRow = horizontalRow(root);
+
+        Button sportTestButton = new Button(this);
+        sportTestButton.setText("TEST SPORT");
+        sportTestButton.setOnClickListener(v ->
+                sendRideModeCommand(
+                        new byte[]{(byte) 0xF0, (byte) 0x4C, (byte) 0x03, (byte) 0x02},
+                        "SET_SPORT"
+                )
+        );
+        modeTestRow.addView(sportTestButton, weighted());
+
+        Button ecoReturnButton = new Button(this);
+        ecoReturnButton.setText("RETURN ECO");
+        ecoReturnButton.setOnClickListener(v ->
+                sendRideModeCommand(
+                        new byte[]{(byte) 0xF0, (byte) 0x4C, (byte) 0x03, (byte) 0x01},
+                        "SET_ECO"
+                )
+        );
+        modeTestRow.addView(ecoReturnButton, weighted());
 
         TextView protocolHint = new TextView(this);
-        protocolHint.setText("TX: F0 4D 11 → FFF1. Ожидаемый ответ: F1 11 … через FFF2.");
+        protocolHint.setText(
+                "SPORT TX: F0 4C 03 02   •   ECO TX: F0 4C 03 01\n" +
+                "Приложение блокирует отправку, если телеметрия не получена или скорость не 0."
+        );
         protocolHint.setTextSize(12);
         protocolHint.setPadding(0, 0, 0, dp(6));
         root.addView(protocolHint, fullWidth());
@@ -158,6 +190,8 @@ public class MainActivity extends Activity {
         speedText.setGravity(Gravity.CENTER_HORIZONTAL);
         speedText.setPadding(0, dp(14), 0, dp(6));
 
+        batteryText = field(root, "Батарея: — В", 24, true);
+        batteryText.setGravity(Gravity.CENTER_HORIZONTAL);
         rawText = field(root, "RAW speed: —   byte[12]: —", 14, false);
         motionText = field(root, "Движение: —", 18, true);
         cruiseText = field(root, "Круиз: —", 18, true);
@@ -567,7 +601,25 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void sendModeQuery() {
+    private void sendRideModeCommand(byte[] command, String label) {
+        if (!hasTelemetry) {
+            Toast.makeText(
+                    this,
+                    "Сначала дождись телеметрии FFF2",
+                    Toast.LENGTH_SHORT
+            ).show();
+            return;
+        }
+
+        if (currentSpeedKmh != 0 || currentMoving) {
+            Toast.makeText(
+                    this,
+                    "Команда заблокирована: самокат должен стоять, скорость 0 км/ч",
+                    Toast.LENGTH_LONG
+            ).show();
+            return;
+        }
+
         if (gatt == null || commandCharacteristic == null) {
             Toast.makeText(this, "FFF1 ещё не готов", Toast.LENGTH_SHORT).show();
             return;
@@ -579,12 +631,6 @@ public class MainActivity extends Activity {
             Toast.makeText(this, "Нет BLUETOOTH_CONNECT", Toast.LENGTH_SHORT).show();
             return;
         }
-
-        byte[] command = new byte[] {
-                (byte) 0xF0,
-                (byte) 0x4D,
-                (byte) 0x11
-        };
 
         try {
             int properties = commandCharacteristic.getProperties();
@@ -617,14 +663,16 @@ public class MainActivity extends Activity {
                     UUID_FFF1.toString(),
                     command.length,
                     "",
-                    "QUERY_MODE",
+                    label,
                     toHex(command),
-                    queued ? "query_mode_sent" : "query_mode_failed"
+                    queued ? "mode_command_sent" : "mode_command_failed"
             );
 
             Toast.makeText(
                     this,
-                    queued ? "Отправлено F0 4D 11" : "Запрос не отправлен",
+                    queued
+                            ? "Отправлено: " + toHex(command)
+                            : "Команда не отправлена",
                     Toast.LENGTH_SHORT
             ).show();
 
@@ -634,31 +682,6 @@ public class MainActivity extends Activity {
     }
 
     private void handleFff2(byte[] packet) {
-        String receivedHex = toHex(packet);
-
-        if (packet.length >= 2 &&
-                (packet[0] & 0xFF) == 0xF1 &&
-                (packet[1] & 0xFF) == 0x11) {
-
-            appendCsv(
-                    "PROTOCOL_RX",
-                    UUID_FFF2.toString(),
-                    packet.length,
-                    "",
-                    "QUERY_MODE_RESPONSE",
-                    receivedHex,
-                    "F1 11 response"
-            );
-
-            runOnUiThread(() ->
-                    Toast.makeText(
-                            this,
-                            "ОТВЕТ РЕЖИМА: " + receivedHex,
-                            Toast.LENGTH_LONG
-                    ).show()
-            );
-        }
-
         if (packet.length < 20) {
             appendCsv("FFF2_NOTIFY", UUID_FFF2.toString(), packet.length,
                     "", currentMarker, toHex(packet), "short_packet");
@@ -668,13 +691,19 @@ public class MainActivity extends Activity {
         packetCount++;
 
         int speedKmh = u8(packet[12]);
-
         int raw16 = u8(packet[10]) | (u8(packet[11]) << 8);
+
+        int batteryRaw = u8(packet[4]) | (u8(packet[5]) << 8);
+        double batteryVoltage = batteryRaw / 100.0;
 
         int flags = u8(packet[18]);
         boolean moving = (flags & 0x02) != 0;
         boolean cruise = (flags & 0x04) != 0;
         boolean brake = (flags & 0x08) != 0;
+
+        hasTelemetry = true;
+        currentSpeedKmh = speedKmh;
+        currentMoving = moving;
 
         String changed = changedIndexes(previousPacket, packet);
         previousPacket = packet.clone();
@@ -690,6 +719,7 @@ public class MainActivity extends Activity {
                 hex,
                 "speed=" + speedKmh +
                         ";raw16=" + raw16 +
+                        ";batteryV=" + String.format(Locale.US, "%.2f", batteryVoltage) +
                         ";flags18=0x" + String.format(Locale.US, "%02X", flags)
         );
 
@@ -697,6 +727,9 @@ public class MainActivity extends Activity {
 
         runOnUiThread(() -> {
             speedText.setText("Скорость: " + speedKmh + " км/ч");
+            batteryText.setText(
+                    "Батарея: " + String.format(Locale.US, "%.2f", batteryVoltage) + " В"
+            );
             rawText.setText(
                     "RAW speed: " + raw16 +
                     "   byte[12]: " + speedKmh +
@@ -782,10 +815,14 @@ public class MainActivity extends Activity {
         packetCount = 0;
         previousPacket = null;
         currentMarker = "";
+        hasTelemetry = false;
+        currentSpeedKmh = -1;
+        currentMoving = false;
         visibleHexLines.clear();
         resetCsv();
 
         speedText.setText("Скорость: — км/ч");
+        batteryText.setText("Батарея: — В");
         rawText.setText("RAW speed: —   byte[12]: —");
         motionText.setText("Движение: —");
         cruiseText.setText("Круиз: —");
@@ -910,6 +947,9 @@ public class MainActivity extends Activity {
         gatt = null;
         commandCharacteristic = null;
         notifyCharacteristic = null;
+        hasTelemetry = false;
+        currentSpeedKmh = -1;
+        currentMoving = false;
     }
 
     @Override
