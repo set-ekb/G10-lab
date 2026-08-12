@@ -59,6 +59,7 @@ public class MainActivity extends Activity {
     private BluetoothAdapter bluetoothAdapter;
     private BluetoothLeScanner bleScanner;
     private BluetoothGatt gatt;
+    private BluetoothGattCharacteristic commandCharacteristic;
     private BluetoothGattCharacteristic notifyCharacteristic;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
@@ -121,15 +122,16 @@ public class MainActivity extends Activity {
         scroll.addView(root);
 
         TextView title = new TextView(this);
-        title.setText("G10 BLE Lab v0.3");
+        title.setText("G10 BLE Lab v0.3.1 — Protocol Lab");
         title.setTextSize(22);
         title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         root.addView(title);
 
         TextView warning = new TextView(this);
         warning.setText(
-                "READ ONLY: приложение не отправляет прикладные команды в FFF1. " +
-                "Включение уведомлений записывает только CCCD-дескриптор, необходимый BLE GATT."
+                "PROTOCOL LAB: приложение пассивно читает FFF2 и по нажатию кнопки " +
+                "отправляет в FFF1 только один диагностический запрос режима F0 4D 11. " +
+                "LOCK/UNLOCK, смена режима, Zero Start, Cruise и OTA-команды не отправляются."
         );
         warning.setTextSize(12);
         warning.setPadding(0, dp(8), 0, dp(12));
@@ -140,6 +142,17 @@ public class MainActivity extends Activity {
         scanButton = new Button(this);
         scanButton.setText("НАЙТИ И ПОДКЛЮЧИТЬ G10");
         root.addView(scanButton, fullWidth());
+
+        Button queryModeButton = new Button(this);
+        queryModeButton.setText("PROTOCOL LAB: ЗАПРОСИТЬ РЕЖИМ");
+        queryModeButton.setOnClickListener(v -> sendModeQuery());
+        root.addView(queryModeButton, fullWidth());
+
+        TextView protocolHint = new TextView(this);
+        protocolHint.setText("TX: F0 4D 11 → FFF1. Ожидаемый ответ: F1 11 … через FFF2.");
+        protocolHint.setTextSize(12);
+        protocolHint.setPadding(0, 0, 0, dp(6));
+        root.addView(protocolHint, fullWidth());
 
         speedText = field(root, "Скорость: — км/ч", 38, true);
         speedText.setGravity(Gravity.CENTER_HORIZONTAL);
@@ -448,7 +461,7 @@ public class MainActivity extends Activity {
                 return;
             }
 
-            BluetoothGattCharacteristic fff1 = service.getCharacteristic(UUID_FFF1);
+            commandCharacteristic = service.getCharacteristic(UUID_FFF1);
             notifyCharacteristic = service.getCharacteristic(UUID_FFF2);
 
             if (notifyCharacteristic == null) {
@@ -456,7 +469,7 @@ public class MainActivity extends Activity {
                 return;
             }
 
-            final boolean fff1Present = fff1 != null;
+            final boolean fff1Present = commandCharacteristic != null;
             runOnUiThread(() ->
                     setStatus("FFF0 найден. FFF1: " +
                             (fff1Present ? "есть" : "нет") +
@@ -554,7 +567,98 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void sendModeQuery() {
+        if (gatt == null || commandCharacteristic == null) {
+            Toast.makeText(this, "FFF1 ещё не готов", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
+                        != PackageManager.PERMISSION_GRANTED) {
+            Toast.makeText(this, "Нет BLUETOOTH_CONNECT", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        byte[] command = new byte[] {
+                (byte) 0xF0,
+                (byte) 0x4D,
+                (byte) 0x11
+        };
+
+        try {
+            int properties = commandCharacteristic.getProperties();
+
+            int writeType =
+                    (properties & BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0
+                            ? BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+                            : BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT;
+
+            boolean queued;
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                int result = gatt.writeCharacteristic(
+                        commandCharacteristic,
+                        command,
+                        writeType
+                );
+                queued = result == 0;
+            } else {
+                //noinspection deprecation
+                commandCharacteristic.setWriteType(writeType);
+                //noinspection deprecation
+                commandCharacteristic.setValue(command);
+                //noinspection deprecation
+                queued = gatt.writeCharacteristic(commandCharacteristic);
+            }
+
+            appendCsv(
+                    "FFF1_TX",
+                    UUID_FFF1.toString(),
+                    command.length,
+                    "",
+                    "QUERY_MODE",
+                    toHex(command),
+                    queued ? "query_mode_sent" : "query_mode_failed"
+            );
+
+            Toast.makeText(
+                    this,
+                    queued ? "Отправлено F0 4D 11" : "Запрос не отправлен",
+                    Toast.LENGTH_SHORT
+            ).show();
+
+        } catch (SecurityException e) {
+            Toast.makeText(this, "Bluetooth permission error", Toast.LENGTH_LONG).show();
+        }
+    }
+
     private void handleFff2(byte[] packet) {
+        String receivedHex = toHex(packet);
+
+        if (packet.length >= 2 &&
+                (packet[0] & 0xFF) == 0xF1 &&
+                (packet[1] & 0xFF) == 0x11) {
+
+            appendCsv(
+                    "PROTOCOL_RX",
+                    UUID_FFF2.toString(),
+                    packet.length,
+                    "",
+                    "QUERY_MODE_RESPONSE",
+                    receivedHex,
+                    "F1 11 response"
+            );
+
+            runOnUiThread(() ->
+                    Toast.makeText(
+                            this,
+                            "ОТВЕТ РЕЖИМА: " + receivedHex,
+                            Toast.LENGTH_LONG
+                    ).show()
+            );
+        }
+
         if (packet.length < 20) {
             appendCsv("FFF2_NOTIFY", UUID_FFF2.toString(), packet.length,
                     "", currentMarker, toHex(packet), "short_packet");
@@ -804,6 +908,7 @@ public class MainActivity extends Activity {
         }
 
         gatt = null;
+        commandCharacteristic = null;
         notifyCharacteristic = null;
     }
 
