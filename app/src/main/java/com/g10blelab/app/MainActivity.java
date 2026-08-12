@@ -126,17 +126,17 @@ public class MainActivity extends Activity {
         scroll.addView(root);
 
         TextView title = new TextView(this);
-        title.setText("G10 BLE Lab v0.3.2 — Mode Test");
+        title.setText("G10 BLE Lab v0.3.3 — Cruise Probe");
         title.setTextSize(22);
         title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         root.addView(title);
 
         TextView warning = new TextView(this);
         warning.setText(
-                "MODE TEST: приложение читает FFF2 и может отправить только две тестовые команды режима: " +
-                "SPORT = F0 4C 03 02 и ECO = F0 4C 03 01. " +
+                "CRUISE PROBE: приложение читает FFF2 и может отправлять только команды режима " +
+                "ECO = F0 4C 03 01, SPORT = F0 4C 03 02 и RACE = F0 4C 03 03. " +
                 "Команды разрешены только при подтверждённой скорости 0 км/ч. " +
-                "LOCK/UNLOCK, RACE, Zero Start, Cruise и OTA не отправляются."
+                "Управление Cruise, LOCK/UNLOCK, Zero Start и OTA не отправляется."
         );
         warning.setTextSize(12);
         warning.setPadding(0, dp(8), 0, dp(12));
@@ -157,18 +157,8 @@ public class MainActivity extends Activity {
 
         LinearLayout modeTestRow = horizontalRow(root);
 
-        Button sportTestButton = new Button(this);
-        sportTestButton.setText("TEST SPORT");
-        sportTestButton.setOnClickListener(v ->
-                sendRideModeCommand(
-                        new byte[]{(byte) 0xF0, (byte) 0x4C, (byte) 0x03, (byte) 0x02},
-                        "SET_SPORT"
-                )
-        );
-        modeTestRow.addView(sportTestButton, weighted());
-
         Button ecoReturnButton = new Button(this);
-        ecoReturnButton.setText("RETURN ECO");
+        ecoReturnButton.setText("ECO");
         ecoReturnButton.setOnClickListener(v ->
                 sendRideModeCommand(
                         new byte[]{(byte) 0xF0, (byte) 0x4C, (byte) 0x03, (byte) 0x01},
@@ -177,10 +167,30 @@ public class MainActivity extends Activity {
         );
         modeTestRow.addView(ecoReturnButton, weighted());
 
+        Button sportTestButton = new Button(this);
+        sportTestButton.setText("SPORT");
+        sportTestButton.setOnClickListener(v ->
+                sendRideModeCommand(
+                        new byte[]{(byte) 0xF0, (byte) 0x4C, (byte) 0x03, (byte) 0x02},
+                        "SET_SPORT"
+                )
+        );
+        modeTestRow.addView(sportTestButton, weighted());
+
+        Button raceTestButton = new Button(this);
+        raceTestButton.setText("RACE");
+        raceTestButton.setOnClickListener(v ->
+                sendRideModeCommand(
+                        new byte[]{(byte) 0xF0, (byte) 0x4C, (byte) 0x03, (byte) 0x03},
+                        "SET_RACE"
+                )
+        );
+        modeTestRow.addView(raceTestButton, weighted());
+
         TextView protocolHint = new TextView(this);
         protocolHint.setText(
-                "SPORT TX: F0 4C 03 02   •   ECO TX: F0 4C 03 01\n" +
-                "Приложение блокирует отправку, если телеметрия не получена или скорость не 0."
+                "ECO: F0 4C 03 01   •   SPORT: F0 4C 03 02   •   RACE: F0 4C 03 03\n" +
+                "Отправка блокируется без телеметрии, при скорости выше 0 или при движении."
         );
         protocolHint.setTextSize(12);
         protocolHint.setPadding(0, 0, 0, dp(6));
@@ -194,12 +204,12 @@ public class MainActivity extends Activity {
         batteryText.setGravity(Gravity.CENTER_HORIZONTAL);
         rawText = field(root, "RAW speed: —   byte[12]: —", 14, false);
         motionText = field(root, "Движение: —", 18, true);
-        cruiseText = field(root, "Круиз: —", 18, true);
+        cruiseText = field(root, "Круиз активен: —", 18, true);
         brakeText = field(root, "Тормоз: —", 18, true);
         modeText = field(root, "Метка режима: —", 16, true);
         packetText = field(root, "Пакетов: 0", 14, false);
 
-        TextView markerTitle = field(root, "Метки теста (не управляют самокатом):", 14, true);
+        TextView markerTitle = field(root, "Метки теста (только пометки CSV, самокатом не управляют):", 14, true);
         markerTitle.setPadding(0, dp(12), 0, dp(4));
 
         LinearLayout row1 = horizontalRow(root);
@@ -211,6 +221,10 @@ public class MainActivity extends Activity {
         addMarkerButton(row2, "ECO");
         addMarkerButton(row2, "SPORT");
         addMarkerButton(row2, "RACE");
+
+        LinearLayout cruiseProbeRow = horizontalRow(root);
+        addMarkerButton(cruiseProbeRow, "КРУИЗ РАЗРЕШЁН");
+        addMarkerButton(cruiseProbeRow, "КРУИЗ ЗАПРЕЩЁН");
 
         LinearLayout row3 = horizontalRow(root);
 
@@ -736,7 +750,7 @@ public class MainActivity extends Activity {
                     "   byte[18]: 0x" + String.format(Locale.US, "%02X", flags)
             );
             motionText.setText("Движение: " + (moving ? "ДА" : "НЕТ"));
-            cruiseText.setText("Круиз: " + (cruise ? "ВКЛ" : "ВЫКЛ"));
+            cruiseText.setText("Круиз активен: " + (cruise ? "ДА" : "НЕТ"));
             brakeText.setText("Тормоз: " + (brake ? "ВКЛ" : "ВЫКЛ"));
             packetText.setText("Пакетов: " + count);
 
@@ -825,7 +839,7 @@ public class MainActivity extends Activity {
         batteryText.setText("Батарея: — В");
         rawText.setText("RAW speed: —   byte[12]: —");
         motionText.setText("Движение: —");
-        cruiseText.setText("Круиз: —");
+        cruiseText.setText("Круиз активен: —");
         brakeText.setText("Тормоз: —");
         modeText.setText("Метка режима: —");
         packetText.setText("Пакетов: 0");
