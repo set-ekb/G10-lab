@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "G10BleLab"
+rootProject.name = "G10 BLE Lab"
 include(":app")
