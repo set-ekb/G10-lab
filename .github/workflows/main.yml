@@ -1,4 +1,4 @@
-name: Build Android APK
+name: Build G10 Companion APK
 
 on:
   workflow_dispatch:
@@ -31,6 +31,6 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: G10-BLE-Lab-debug
+          name: G10-Companion-v0.4.0-alpha-debug
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error

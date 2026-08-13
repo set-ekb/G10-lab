@@ -1,4 +1,0 @@
-G10 BLE Lab v0.2
-Status: source ready for GitHub Actions build.
-Safety: READ ONLY application protocol; no FFF1 commands; no OTA/OAD writes.
-Next input needed: exported CSV from a real G10 session with test markers.

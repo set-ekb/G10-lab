@@ -2,18 +2,6 @@ package com.g10blelab.app;
 
 import android.Manifest;
 import android.app.Activity;
-import android.bluetooth.BluetoothAdapter;
-import android.bluetooth.BluetoothDevice;
-import android.bluetooth.BluetoothGatt;
-import android.bluetooth.BluetoothGattCallback;
-import android.bluetooth.BluetoothGattCharacteristic;
-import android.bluetooth.BluetoothGattDescriptor;
-import android.bluetooth.BluetoothGattService;
-import android.bluetooth.BluetoothManager;
-import android.bluetooth.BluetoothProfile;
-import android.bluetooth.le.BluetoothLeScanner;
-import android.bluetooth.le.ScanCallback;
-import android.bluetooth.le.ScanResult;
 import android.content.ContentResolver;
 import android.content.Intent;
 import android.content.pm.PackageManager;
@@ -21,1008 +9,1089 @@ import android.graphics.Typeface;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
-import android.os.Handler;
-import android.os.Looper;
-import android.provider.Settings;
+import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
+import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
-import java.util.ArrayDeque;
-import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
-import java.util.UUID;
 
-public class MainActivity extends Activity {
+public class MainActivity extends Activity
+        implements G10BleManager.Listener, TripTracker.Listener {
 
-    private static final int REQ_BLE_PERMISSIONS = 1001;
-    private static final int REQ_CREATE_CSV = 1002;
+    private static final int REQ_BLE = 1001;
+    private static final int REQ_LOCATION = 1002;
+    private static final int REQ_EXPORT = 1003;
+    private static final int REQ_IMPORT_BACKUP = 1004;
 
-    private static final UUID UUID_FFF0 =
-            UUID.fromString("0000fff0-0000-1000-8000-00805f9b34fb");
-    private static final UUID UUID_FFF1 =
-            UUID.fromString("0000fff1-0000-1000-8000-00805f9b34fb");
-    private static final UUID UUID_FFF2 =
-            UUID.fromString("0000fff2-0000-1000-8000-00805f9b34fb");
-    private static final UUID UUID_CCCD =
-            UUID.fromString("00002902-0000-1000-8000-00805f9b34fb");
+    private enum ExportKind {
+        NONE, LAB, TRIP_CSV, TRIP_GPX, TRIP_KML, TRIP_REPORT, BACKUP
+    }
+    private ExportKind pendingExport = ExportKind.NONE;
 
-    private BluetoothAdapter bluetoothAdapter;
-    private BluetoothLeScanner bleScanner;
-    private BluetoothGatt gatt;
-    private BluetoothGattCharacteristic commandCharacteristic;
-    private BluetoothGattCharacteristic notifyCharacteristic;
+    private G10BleManager ble;
+    private TripTracker trips;
+    private BatteryCoach batteryCoach;
 
-    private final Handler mainHandler = new Handler(Looper.getMainLooper());
-    private boolean scanning = false;
-    private String currentMarker = "";
+    private final SimpleDateFormat fileStamp =
+            new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US);
 
-    private TextView statusText;
+    private FrameLayout content;
+    private View dashboardTab;
+    private View tripTab;
+    private View mapTab;
+    private View batteryTab;
+    private View labTab;
+
+    private TextView connectionText;
     private TextView speedText;
     private TextView batteryText;
-    private TextView rawText;
-    private TextView motionText;
-    private TextView cruiseText;
-    private TextView cruiseEnabledText;
-    private TextView brakeText;
     private TextView modeText;
-    private TextView packetText;
+    private TextView cruiseText;
+    private TextView brakeText;
+    private TextView tripMiniText;
+
+    private TextView tripStateText;
+    private TextView tripStatsText;
+    private TextView historyText;
+
+    private TextView locationText;
+    private TrackView trackView;
+
+    private TextView aiVoltageText;
+    private TextView aiSagText;
+    private TextView aiEfficiencyText;
+    private TextView aiRangeText;
+    private TextView aiLearningText;
+    private TextView aiSocText;
+    private TextView aiHealthText;
+    private TextView aiConfidenceText;
+    private TextView aiProfileText;
+    private TextView aiVerdictText;
+    private TextView aiTripReportText;
+    private EditText aiFullVoltageInput;
+    private EditText aiReserveVoltageInput;
+    private EditText aiCapacityInput;
+    private EditText aiTemperatureInput;
+    private EditText aiCyclesInput;
+
+    private TextView protocolText;
+    private TextView gattText;
     private TextView hexText;
-    private Button scanButton;
-
-    private long packetCount = 0;
-    private boolean hasTelemetry = false;
-    private int currentSpeedKmh = -1;
-    private boolean currentMoving = false;
-    private byte[] previousPacket;
-
-    private final List<String> csvRows = new ArrayList<>();
-    private final ArrayDeque<String> visibleHexLines = new ArrayDeque<>();
-    private static final int MAX_VISIBLE_HEX_LINES = 120;
-
-    private final SimpleDateFormat timestampFormat =
-            new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US);
+    private TextView labCountText;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        BluetoothManager manager = getSystemService(BluetoothManager.class);
-        bluetoothAdapter = manager != null ? manager.getAdapter() : null;
+        ble = new G10BleManager(this, this);
+        trips = new TripTracker(this, this);
+        batteryCoach = new BatteryCoach(this);
+        trips.setReserveVoltage(batteryCoach.getReserveVoltage());
 
         buildUi();
-        resetCsv();
+        refreshTripUi();
+        refreshHistory();
+        refreshBatteryAi();
 
-        if (bluetoothAdapter == null) {
-            setStatus("Bluetooth недоступен на этом устройстве");
-            scanButton.setEnabled(false);
-            return;
+        if (hasLocationPermission()) {
+            trips.startMonitoring();
         }
-
-        scanButton.setOnClickListener(v -> {
-            if (scanning) {
-                stopScan();
-            } else {
-                ensurePermissionsAndScan();
-            }
-        });
     }
 
     private void buildUi() {
-        int pad = dp(12);
-
-        ScrollView scroll = new ScrollView(this);
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(pad, pad, pad, pad);
-        scroll.addView(root);
+        root.setPadding(dp(10), dp(10), dp(10), dp(8));
 
         TextView title = new TextView(this);
-        title.setText("G10 BLE Lab v0.3.4 — Cruise Query");
+        title.setText("G10 Companion  v0.5.0 Alpha");
         title.setTextSize(22);
         title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        root.addView(title);
+        title.setGravity(Gravity.CENTER_HORIZONTAL);
+        root.addView(title, fullWidth());
 
-        TextView warning = new TextView(this);
-        warning.setText(
-                "CRUISE QUERY: приложение читает FFF2, управляет только режимами ECO/SPORT/RACE " +
-                "и по отдельной кнопке отправляет диагностический запрос Cruise F0 4D 13. " +
-                "Запрос и команды режима разрешены только при скорости 0 км/ч. " +
-                "Команды включения/выключения Cruise, LOCK/UNLOCK, Zero Start и OTA не отправляются."
-        );
-        warning.setTextSize(12);
-        warning.setPadding(0, dp(8), 0, dp(12));
-        root.addView(warning);
+        TextView subtitle = new TextView(this);
+        subtitle.setText("Поездки • локальная аналитика • Battery AI • LAB");
+        subtitle.setTextSize(12);
+        subtitle.setGravity(Gravity.CENTER_HORIZONTAL);
+        subtitle.setPadding(0, 0, 0, dp(8));
+        root.addView(subtitle, fullWidth());
 
-        statusText = field(root, "Статус: готово", 15, false);
+        LinearLayout tabs = new LinearLayout(this);
+        tabs.setOrientation(LinearLayout.HORIZONTAL);
+        root.addView(tabs, fullWidth());
 
-        scanButton = new Button(this);
-        scanButton.setText("НАЙТИ И ПОДКЛЮЧИТЬ G10");
-        root.addView(scanButton, fullWidth());
+        Button bDash = tabButton("ГЛАВНАЯ");
+        Button bTrip = tabButton("ПОЕЗДКА");
+        Button bMap = tabButton("КАРТА");
+        Button bAi = tabButton("BAT AI");
+        Button bLab = tabButton("LAB");
 
-        TextView protocolTitle = new TextView(this);
-        protocolTitle.setText("MODE TEST — только на стоящем самокате");
-        protocolTitle.setTextSize(14);
-        protocolTitle.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        protocolTitle.setPadding(0, dp(8), 0, dp(3));
-        root.addView(protocolTitle, fullWidth());
+        tabs.addView(bDash, weighted());
+        tabs.addView(bTrip, weighted());
+        tabs.addView(bMap, weighted());
+        tabs.addView(bAi, weighted());
+        tabs.addView(bLab, weighted());
 
-        LinearLayout modeTestRow = horizontalRow(root);
+        content = new FrameLayout(this);
+        root.addView(content, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
 
-        Button ecoReturnButton = new Button(this);
-        ecoReturnButton.setText("ECO");
-        ecoReturnButton.setOnClickListener(v ->
-                sendRideModeCommand(
-                        new byte[]{(byte) 0xF0, (byte) 0x4C, (byte) 0x03, (byte) 0x01},
-                        "SET_ECO"
-                )
-        );
-        modeTestRow.addView(ecoReturnButton, weighted());
+        dashboardTab = buildDashboard();
+        tripTab = buildTripTab();
+        mapTab = buildMapTab();
+        batteryTab = buildBatteryTab();
+        labTab = buildLabTab();
 
-        Button sportTestButton = new Button(this);
-        sportTestButton.setText("SPORT");
-        sportTestButton.setOnClickListener(v ->
-                sendRideModeCommand(
-                        new byte[]{(byte) 0xF0, (byte) 0x4C, (byte) 0x03, (byte) 0x02},
-                        "SET_SPORT"
-                )
-        );
-        modeTestRow.addView(sportTestButton, weighted());
+        content.addView(dashboardTab);
+        content.addView(tripTab);
+        content.addView(mapTab);
+        content.addView(batteryTab);
+        content.addView(labTab);
 
-        Button raceTestButton = new Button(this);
-        raceTestButton.setText("RACE");
-        raceTestButton.setOnClickListener(v ->
-                sendRideModeCommand(
-                        new byte[]{(byte) 0xF0, (byte) 0x4C, (byte) 0x03, (byte) 0x03},
-                        "SET_RACE"
-                )
-        );
-        modeTestRow.addView(raceTestButton, weighted());
+        bDash.setOnClickListener(v -> showTab(dashboardTab));
+        bTrip.setOnClickListener(v -> showTab(tripTab));
+        bMap.setOnClickListener(v -> showTab(mapTab));
+        bAi.setOnClickListener(v -> showTab(batteryTab));
+        bLab.setOnClickListener(v -> showTab(labTab));
 
-        TextView protocolHint = new TextView(this);
-        protocolHint.setText(
-                "ECO: F0 4C 03 01   •   SPORT: F0 4C 03 02   •   RACE: F0 4C 03 03\n" +
-                "Отправка блокируется без телеметрии, при скорости выше 0 или при движении."
-        );
-        protocolHint.setTextSize(12);
-        protocolHint.setPadding(0, 0, 0, dp(6));
-        root.addView(protocolHint, fullWidth());
+        setContentView(root);
+        showTab(dashboardTab);
+    }
 
-        Button queryCruiseButton = new Button(this);
-        queryCruiseButton.setText("QUERY CRUISE — F0 4D 13");
-        queryCruiseButton.setOnClickListener(v ->
-                sendRideModeCommand(
-                        new byte[]{(byte) 0xF0, (byte) 0x4D, (byte) 0x13},
-                        "QUERY_CRUISE"
-                )
-        );
-        root.addView(queryCruiseButton, fullWidth());
+    private View buildDashboard() {
+        LinearLayout box = verticalBox();
 
-        TextView queryHint = new TextView(this);
-        queryHint.setText(
-                "Диагностический запрос состояния. Ожидаемый ответ Neoline: " +
-                "F1 13 .. 01 = разрешён, F1 13 .. 00 = запрещён."
-        );
-        queryHint.setTextSize(12);
-        queryHint.setPadding(0, 0, 0, dp(8));
-        root.addView(queryHint, fullWidth());
+        connectionText = field(box, "BLE: не подключено", 15, true);
 
-        speedText = field(root, "Скорость: — км/ч", 38, true);
+        Button connect = new Button(this);
+        connect.setText("НАЙТИ И ПОДКЛЮЧИТЬ G10");
+        connect.setOnClickListener(v -> ensureBleAndScan());
+        box.addView(connect, fullWidth());
+
+        speedText = field(box, "0", 58, true);
         speedText.setGravity(Gravity.CENTER_HORIZONTAL);
-        speedText.setPadding(0, dp(14), 0, dp(6));
 
-        batteryText = field(root, "Батарея: — В", 24, true);
+        TextView kmh = field(box, "км/ч", 14, false);
+        kmh.setGravity(Gravity.CENTER_HORIZONTAL);
+
+        batteryText = field(box, "Батарея: — В", 26, true);
         batteryText.setGravity(Gravity.CENTER_HORIZONTAL);
-        rawText = field(root, "RAW speed: —   byte[12]: —", 14, false);
-        motionText = field(root, "Движение: —", 18, true);
-        cruiseText = field(root, "Круиз активен: —", 18, true);
-        cruiseEnabledText = field(root, "Круиз разрешён: НЕИЗВЕСТНО", 18, true);
-        brakeText = field(root, "Тормоз: —", 18, true);
-        modeText = field(root, "Метка режима: —", 16, true);
-        packetText = field(root, "Пакетов: 0", 14, false);
 
-        TextView markerTitle = field(root, "Метки теста (только пометки CSV, самокатом не управляют):", 14, true);
-        markerTitle.setPadding(0, dp(12), 0, dp(4));
+        modeText = field(box, "Режим: —", 20, true);
+        cruiseText = field(box, "Круиз активен: НЕТ", 18, true);
+        brakeText = field(box, "Тормоз: НЕТ", 18, true);
+        tripMiniText = field(box, "Поездка: не активна", 16, false);
 
-        LinearLayout row1 = horizontalRow(root);
-        addMarkerButton(row1, "СТОИТ");
-        addMarkerButton(row1, "КОЛЕСО");
-        addMarkerButton(row1, "ТОРМОЗ");
+        TextView modeTitle = field(box, "Режим движения", 14, true);
+        modeTitle.setPadding(0, dp(12), 0, dp(3));
 
-        LinearLayout row2 = horizontalRow(root);
-        addMarkerButton(row2, "ECO");
-        addMarkerButton(row2, "SPORT");
-        addMarkerButton(row2, "RACE");
+        LinearLayout modes = new LinearLayout(this);
+        modes.setOrientation(LinearLayout.HORIZONTAL);
+        box.addView(modes, fullWidth());
 
-        LinearLayout cruiseProbeRow = horizontalRow(root);
-        addMarkerButton(cruiseProbeRow, "КРУИЗ РАЗРЕШЁН");
-        addMarkerButton(cruiseProbeRow, "КРУИЗ ЗАПРЕЩЁН");
+        Button eco = modeButton("ECO", 1);
+        Button sport = modeButton("SPORT", 2);
+        Button race = modeButton("RACE", 3);
+        modes.addView(eco, weighted());
+        modes.addView(sport, weighted());
+        modes.addView(race, weighted());
 
-        LinearLayout row3 = horizontalRow(root);
+        TextView safety = field(
+                box,
+                "Команды режима отправляются только при полученной телеметрии, скорости 0 и отсутствии движения.",
+                12,
+                false
+        );
+        safety.setPadding(0, dp(8), 0, dp(8));
+
+        return wrap(box);
+    }
+
+    private View buildTripTab() {
+        LinearLayout box = verticalBox();
+
+        field(box, "ПОЕЗДКА", 22, true);
+        tripStateText = field(box, "Состояние: ожидание", 17, true);
+        tripStatsText = field(box, "Дистанция: 0.00 км", 17, false);
+
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        box.addView(row, fullWidth());
+
+        Button start = new Button(this);
+        start.setText("СТАРТ");
+        start.setOnClickListener(v -> {
+            ensureLocationPermission();
+            trips.startTrip(true);
+        });
+        row.addView(start, weighted());
+
+        Button stop = new Button(this);
+        stop.setText("ФИНИШ");
+        stop.setOnClickListener(v -> trips.stopTrip("manual"));
+        row.addView(stop, weighted());
+
+        LinearLayout exportRow1 = new LinearLayout(this);
+        exportRow1.setOrientation(LinearLayout.HORIZONTAL);
+        box.addView(exportRow1, fullWidth());
+
+        Button exportCsv = new Button(this);
+        exportCsv.setText("CSV");
+        exportCsv.setOnClickListener(v -> exportTripCsv());
+        exportRow1.addView(exportCsv, weighted());
+
+        Button exportGpx = new Button(this);
+        exportGpx.setText("GPX");
+        exportGpx.setOnClickListener(v -> exportTripGpx());
+        exportRow1.addView(exportGpx, weighted());
+
+        LinearLayout exportRow2 = new LinearLayout(this);
+        exportRow2.setOrientation(LinearLayout.HORIZONTAL);
+        box.addView(exportRow2, fullWidth());
+
+        Button exportKml = new Button(this);
+        exportKml.setText("KML");
+        exportKml.setOnClickListener(v -> exportTripKml());
+        exportRow2.addView(exportKml, weighted());
+
+        Button exportReport = new Button(this);
+        exportReport.setText("ОТЧЁТ AI");
+        exportReport.setOnClickListener(v -> exportTripReport());
+        exportRow2.addView(exportReport, weighted());
+
+        TextView auto = field(
+                box,
+                "AUTO: поездка стартует при движении G10 и завершается после 2 минут без движения. " +
+                        "CSV хранит телеметрию, GPX подходит для трекеров, KML — для карт.",
+                12,
+                false
+        );
+        auto.setPadding(0, dp(8), 0, dp(10));
+
+        field(box, "Последние поездки", 16, true);
+        historyText = field(box, "—", 13, false);
+        historyText.setTypeface(Typeface.MONOSPACE);
+
+        return wrap(box);
+    }
+
+    private View buildMapTab() {
+        LinearLayout box = verticalBox();
+
+        field(box, "КАРТА ТРЕКА", 22, true);
+        locationText = field(box, "GPS: нет данных", 14, false);
+
+        trackView = new TrackView(this);
+        box.addView(trackView, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(420)));
+
+        TextView note = field(
+                box,
+                "Alpha: здесь рисуется реальная геометрия GPS-трека без интернет-карт. " +
+                        "Подложку карты и маршрутизацию добавим следующим этапом.",
+                12,
+                false
+        );
+        note.setPadding(0, dp(8), 0, 0);
+
+        return wrap(box);
+    }
+
+    private View buildBatteryTab() {
+        LinearLayout box = verticalBox();
+
+        field(box, "BATTERY AI — локальный анализ", 22, true);
+        aiVoltageText = field(box, "Напряжение: —", 22, true);
+        aiSocText = field(box, "SOC: —", 18, true);
+        aiSagText = field(box, "Просадка: —", 18, false);
+        aiEfficiencyText = field(box, "Обученная эффективность: данных мало", 18, false);
+        aiRangeText = field(box, "Прогноз запаса: обучается", 18, true);
+        aiHealthText = field(box, "Тренд SOH: обучается", 16, false);
+        aiConfidenceText = field(box, "Уверенность: 0%", 15, false);
+        aiLearningText = field(box, "Обучающих поездок: 0", 15, false);
+        aiVerdictText = field(box, "Вердикт: идёт обучение", 15, true);
+        aiVerdictText.setPadding(0, dp(8), 0, dp(10));
+
+        TextView info = field(
+                box,
+                "SOC и тренд SOH — оценочные, пока реальный BMS-процент и ток не расшифрованы. " +
+                        "Приложение не выдумывает Wh/км: оно учится по GPS, напряжению, режиму, " +
+                        "рельефу, температуре, просадке и восстановлению.",
+                13,
+                false
+        );
+        info.setPadding(0, dp(12), 0, dp(8));
+
+        field(box, "Последний подробный разбор", 16, true);
+        aiTripReportText = field(box, batteryCoach.getLastTripReport(), 13, false);
+        aiTripReportText.setTypeface(Typeface.MONOSPACE);
+        aiTripReportText.setTextIsSelectable(true);
+
+        TextView profileTitle = field(box, "Профиль батареи", 17, true);
+        profileTitle.setPadding(0, dp(14), 0, dp(4));
+        aiProfileText = field(box, "—", 13, false);
+
+        LinearLayout voltageRow = new LinearLayout(this);
+        voltageRow.setOrientation(LinearLayout.HORIZONTAL);
+        box.addView(voltageRow, fullWidth());
+        aiFullVoltageInput = decimalInput(
+                "Полный заряд, В",
+                batteryCoach.getFullVoltage(),
+                false
+        );
+        aiReserveVoltageInput = decimalInput(
+                "Резерв, В",
+                batteryCoach.getReserveVoltage(),
+                false
+        );
+        voltageRow.addView(aiFullVoltageInput, weighted());
+        voltageRow.addView(aiReserveVoltageInput, weighted());
+
+        LinearLayout profileRow = new LinearLayout(this);
+        profileRow.setOrientation(LinearLayout.HORIZONTAL);
+        box.addView(profileRow, fullWidth());
+        aiCapacityInput = decimalInput(
+                "Ёмкость, А·ч",
+                batteryCoach.getCapacityAh(),
+                false
+        );
+        aiTemperatureInput = decimalInput(
+                "Температура, °C",
+                batteryCoach.getTemperatureC(),
+                true
+        );
+        profileRow.addView(aiCapacityInput, weighted());
+        profileRow.addView(aiTemperatureInput, weighted());
+
+        aiCyclesInput = decimalInput(
+                "Циклы зарядки (если известны)",
+                batteryCoach.getCycleCount(),
+                false
+        );
+        aiCyclesInput.setInputType(InputType.TYPE_CLASS_NUMBER);
+        box.addView(aiCyclesInput, fullWidth());
+
+        Button saveProfile = new Button(this);
+        saveProfile.setText("СОХРАНИТЬ ПРОФИЛЬ");
+        saveProfile.setOnClickListener(v -> saveBatteryProfile());
+        box.addView(saveProfile, fullWidth());
+
+        LinearLayout backupRow = new LinearLayout(this);
+        backupRow.setOrientation(LinearLayout.HORIZONTAL);
+        box.addView(backupRow, fullWidth());
+
+        Button backup = new Button(this);
+        backup.setText("КОПИЯ JSON");
+        backup.setOnClickListener(v -> exportBackup());
+        backupRow.addView(backup, weighted());
+
+        Button restore = new Button(this);
+        restore.setText("ВОССТАНОВИТЬ");
+        restore.setOnClickListener(v -> importBackup());
+        backupRow.addView(restore, weighted());
+
+        TextView profileNote = field(
+                box,
+                "Если точная ёмкость с наклейки неизвестна — оставьте 0. " +
+                        "Температуру меняйте перед поездкой. Копию JSON можно сохранить в Google Drive " +
+                        "через системное окно файлов.",
+                12,
+                false
+        );
+        profileNote.setPadding(0, dp(4), 0, dp(8));
+
+        return wrap(box);
+    }
+
+    private View buildLabTab() {
+        LinearLayout box = verticalBox();
+
+        field(box, "LAB — диагностика протокола", 22, true);
+
+        TextView warn = field(
+                box,
+                "Неизвестные 55 AA / 5A A5 системы анализируются только пассивно. " +
+                        "Свет, рекуперация, TCS, Zero Start, Cruise ON/OFF, LOCK/UNLOCK и OTA здесь не отправляются.",
+                12,
+                false
+        );
+        warn.setPadding(0, 0, 0, dp(8));
+
+        TextView lastTest = field(
+                box,
+                "Последний тест 12.08.2026: после F0 4D 13 в 32 следующих кадрах FFF2 " +
+                        "отдельного ответа не найдено. Команда не считается подтверждённой и в v0.5 не отправляется.",
+                12,
+                true
+        );
+        lastTest.setPadding(0, 0, 0, dp(8));
+
+        protocolText = field(box, "Protocol Detector: —", 14, true);
+        gattText = field(box, "GATT: —", 12, false);
+        labCountText = field(box, "LAB rows: 0", 12, false);
+
+        field(box, "Метки", 14, true);
+        LinearLayout r1 = new LinearLayout(this);
+        r1.setOrientation(LinearLayout.HORIZONTAL);
+        box.addView(r1, fullWidth());
+        addMarker(r1, "СТОИТ");
+        addMarker(r1, "КОЛЕСО");
+        addMarker(r1, "ТОРМОЗ");
+
+        LinearLayout r2 = new LinearLayout(this);
+        r2.setOrientation(LinearLayout.HORIZONTAL);
+        box.addView(r2, fullWidth());
+        addMarker(r2, "ECO");
+        addMarker(r2, "SPORT");
+        addMarker(r2, "RACE");
+
+        LinearLayout r3 = new LinearLayout(this);
+        r3.setOrientation(LinearLayout.HORIZONTAL);
+        box.addView(r3, fullWidth());
+        addMarker(r3, "КРУИЗ ON");
+        addMarker(r3, "КРУИЗ OFF");
+
+        LinearLayout actions = new LinearLayout(this);
+        actions.setOrientation(LinearLayout.HORIZONTAL);
+        box.addView(actions, fullWidth());
 
         Button clear = new Button(this);
-        clear.setText("ОЧИСТИТЬ");
-        clear.setOnClickListener(v -> clearLog());
-        row3.addView(clear, weighted());
+        clear.setText("ОЧИСТИТЬ LAB");
+        clear.setOnClickListener(v -> {
+            ble.clearLabLog();
+            refreshLab();
+        });
+        actions.addView(clear, weighted());
 
         Button export = new Button(this);
-        export.setText("ЭКСПОРТ CSV");
-        export.setOnClickListener(v -> exportCsv());
-        row3.addView(export, weighted());
+        export.setText("ЭКСПОРТ LAB CSV");
+        export.setOnClickListener(v -> exportLab());
+        actions.addView(export, weighted());
 
-        TextView hexTitle = field(root, "Последние FFF2 пакеты:", 14, true);
-        hexTitle.setPadding(0, dp(12), 0, dp(4));
-
-        hexText = new TextView(this);
-        hexText.setTextSize(11);
+        field(box, "Последние FFF2 / protocol packets • Δ = изменившиеся байты", 14, true);
+        hexText = field(box, "—", 11, false);
         hexText.setTypeface(Typeface.MONOSPACE);
-        hexText.setText("—");
         hexText.setTextIsSelectable(true);
-        root.addView(hexText, fullWidth());
 
-        setContentView(scroll);
+        return wrap(box);
+    }
+
+    private Button tabButton(String text) {
+        Button b = new Button(this);
+        b.setText(text);
+        b.setTextSize(10);
+        b.setMinWidth(0);
+        b.setMinimumWidth(0);
+        return b;
+    }
+
+    private Button modeButton(String text, int mode) {
+        Button b = new Button(this);
+        b.setText(text);
+        b.setOnClickListener(v -> {
+            boolean ok = ble.sendMode(mode);
+            if (!ok) {
+                Toast.makeText(
+                        this,
+                        "Команда заблокирована: G10 должен стоять, скорость 0 км/ч",
+                        Toast.LENGTH_LONG
+                ).show();
+            }
+        });
+        return b;
+    }
+
+    private void addMarker(LinearLayout row, String marker) {
+        Button b = new Button(this);
+        b.setText(marker);
+        b.setTextSize(10);
+        b.setOnClickListener(v -> {
+            ble.setMarker(marker);
+            refreshLab();
+        });
+        row.addView(b, weighted());
+    }
+
+    private LinearLayout verticalBox() {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(6), dp(8), dp(6), dp(12));
+        return box;
+    }
+
+    private ScrollView wrap(View child) {
+        ScrollView s = new ScrollView(this);
+        s.addView(child);
+        return s;
     }
 
     private TextView field(LinearLayout root, String text, float size, boolean bold) {
-        TextView tv = new TextView(this);
-        tv.setText(text);
-        tv.setTextSize(size);
-        if (bold) {
-            tv.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        TextView t = new TextView(this);
+        t.setText(text);
+        t.setTextSize(size);
+        if (bold) t.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        t.setPadding(0, dp(3), 0, dp(3));
+        root.addView(t, fullWidth());
+        return t;
+    }
+
+    private EditText decimalInput(String hint, double value, boolean signed) {
+        EditText input = new EditText(this);
+        input.setHint(hint);
+        input.setSingleLine(true);
+        input.setText(String.format(Locale.US, "%.1f", value));
+        int type = InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL;
+        if (signed) type |= InputType.TYPE_NUMBER_FLAG_SIGNED;
+        input.setInputType(type);
+        input.setPadding(dp(6), dp(2), dp(6), dp(2));
+        return input;
+    }
+
+    private void saveBatteryProfile() {
+        try {
+            double full = number(aiFullVoltageInput);
+            double reserve = number(aiReserveVoltageInput);
+            double capacity = number(aiCapacityInput);
+            double temperature = number(aiTemperatureInput);
+            int cycles = (int) Math.round(number(aiCyclesInput));
+
+            boolean saved = batteryCoach.updateProfile(
+                    full,
+                    reserve,
+                    capacity,
+                    temperature,
+                    cycles
+            );
+            if (!saved) {
+                Toast.makeText(
+                        this,
+                        "Проверьте профиль: полный заряд должен быть выше резерва минимум на 3 В",
+                        Toast.LENGTH_LONG
+                ).show();
+                return;
+            }
+
+            trips.setReserveVoltage(reserve);
+            refreshBatteryAi();
+            Toast.makeText(this, "Профиль батареи сохранён", Toast.LENGTH_SHORT).show();
+        } catch (NumberFormatException e) {
+            Toast.makeText(this, "Введите числа во всех полях профиля", Toast.LENGTH_LONG).show();
         }
-        tv.setPadding(0, dp(3), 0, dp(3));
-        root.addView(tv, fullWidth());
-        return tv;
     }
 
-    private LinearLayout horizontalRow(LinearLayout root) {
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        root.addView(row, fullWidth());
-        return row;
+    private double number(EditText input) throws NumberFormatException {
+        if (input == null) throw new NumberFormatException("input is null");
+        return Double.parseDouble(input.getText().toString().trim().replace(',', '.'));
     }
 
-    private void addMarkerButton(LinearLayout row, String marker) {
-        Button button = new Button(this);
-        button.setText(marker);
-        button.setOnClickListener(v -> setMarker(marker));
-        row.addView(button, weighted());
+    private void loadProfileInputs() {
+        if (aiFullVoltageInput == null) return;
+        aiFullVoltageInput.setText(String.format(Locale.US, "%.1f", batteryCoach.getFullVoltage()));
+        aiReserveVoltageInput.setText(String.format(Locale.US, "%.1f", batteryCoach.getReserveVoltage()));
+        aiCapacityInput.setText(String.format(Locale.US, "%.1f", batteryCoach.getCapacityAh()));
+        aiTemperatureInput.setText(String.format(Locale.US, "%.1f", batteryCoach.getTemperatureC()));
+        aiCyclesInput.setText(String.valueOf(batteryCoach.getCycleCount()));
     }
 
     private LinearLayout.LayoutParams fullWidth() {
         return new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-        );
+                LinearLayout.LayoutParams.WRAP_CONTENT);
     }
 
     private LinearLayout.LayoutParams weighted() {
         return new LinearLayout.LayoutParams(
-                0,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                1f
-        );
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
     }
 
-    private int dp(int value) {
-        return Math.round(value * getResources().getDisplayMetrics().density);
+    private int dp(int v) {
+        return Math.round(v * getResources().getDisplayMetrics().density);
     }
 
-    private void ensurePermissionsAndScan() {
+    private void showTab(View selected) {
+        dashboardTab.setVisibility(selected == dashboardTab ? View.VISIBLE : View.GONE);
+        tripTab.setVisibility(selected == tripTab ? View.VISIBLE : View.GONE);
+        mapTab.setVisibility(selected == mapTab ? View.VISIBLE : View.GONE);
+        batteryTab.setVisibility(selected == batteryTab ? View.VISIBLE : View.GONE);
+        labTab.setVisibility(selected == labTab ? View.VISIBLE : View.GONE);
+    }
+
+    private void ensureBleAndScan() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            List<String> missing = new ArrayList<>();
             if (checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN)
-                    != PackageManager.PERMISSION_GRANTED) {
-                missing.add(Manifest.permission.BLUETOOTH_SCAN);
-            }
-            if (checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
-                    != PackageManager.PERMISSION_GRANTED) {
-                missing.add(Manifest.permission.BLUETOOTH_CONNECT);
-            }
-
-            if (!missing.isEmpty()) {
-                requestPermissions(missing.toArray(new String[0]), REQ_BLE_PERMISSIONS);
-                return;
-            }
-        } else {
-            if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
-                    != PackageManager.PERMISSION_GRANTED) {
+                    != PackageManager.PERMISSION_GRANTED ||
+                    checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
+                            != PackageManager.PERMISSION_GRANTED) {
                 requestPermissions(
-                        new String[]{Manifest.permission.ACCESS_FINE_LOCATION},
-                        REQ_BLE_PERMISSIONS
+                        new String[]{
+                                Manifest.permission.BLUETOOTH_SCAN,
+                                Manifest.permission.BLUETOOTH_CONNECT
+                        },
+                        REQ_BLE
                 );
                 return;
             }
         }
+        ble.scanAndConnect();
+    }
 
-        startScan();
+    private void ensureLocationPermission() {
+        if (!hasLocationPermission()) {
+            requestPermissions(
+                    new String[]{
+                            Manifest.permission.ACCESS_COARSE_LOCATION,
+                            Manifest.permission.ACCESS_FINE_LOCATION
+                    },
+                    REQ_LOCATION
+            );
+        } else {
+            trips.startMonitoring();
+        }
+    }
+
+    private boolean hasLocationPermission() {
+        return checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
+                == PackageManager.PERMISSION_GRANTED ||
+                checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION)
+                        == PackageManager.PERMISSION_GRANTED;
     }
 
     @Override
     public void onRequestPermissionsResult(
-            int requestCode,
-            String[] permissions,
-            int[] grantResults
-    ) {
+            int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
 
-        if (requestCode != REQ_BLE_PERMISSIONS) {
-            return;
-        }
-
-        boolean allGranted = true;
-        for (int result : grantResults) {
-            if (result != PackageManager.PERMISSION_GRANTED) {
-                allGranted = false;
-                break;
+        if (requestCode == REQ_BLE) {
+            boolean ok = true;
+            for (int r : grantResults) {
+                if (r != PackageManager.PERMISSION_GRANTED) ok = false;
+            }
+            if (ok) ble.scanAndConnect();
+        } else if (requestCode == REQ_LOCATION) {
+            if (hasLocationPermission()) {
+                trips.startMonitoring();
+                Toast.makeText(this, "GPS включён для поездок", Toast.LENGTH_SHORT).show();
             }
         }
-
-        if (allGranted) {
-            startScan();
-        } else {
-            setStatus("Нет разрешений Bluetooth");
-            Toast.makeText(
-                    this,
-                    "Разреши Bluetooth/устройства поблизости в настройках приложения",
-                    Toast.LENGTH_LONG
-            ).show();
-        }
-    }
-
-    private boolean bluetoothEnabled() {
-        if (bluetoothAdapter == null) return false;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-                checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
-                        != PackageManager.PERMISSION_GRANTED) {
-            return false;
-        }
-        return bluetoothAdapter.isEnabled();
-    }
-
-    private void startScan() {
-        if (!bluetoothEnabled()) {
-            setStatus("Включи Bluetooth");
-            try {
-                startActivity(new Intent(Settings.ACTION_BLUETOOTH_SETTINGS));
-            } catch (Exception ignored) {
-            }
-            return;
-        }
-
-        bleScanner = bluetoothAdapter.getBluetoothLeScanner();
-        if (bleScanner == null) {
-            setStatus("BLE Scanner недоступен");
-            return;
-        }
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-                checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN)
-                        != PackageManager.PERMISSION_GRANTED) {
-            setStatus("Нет BLUETOOTH_SCAN");
-            return;
-        }
-
-        closeGatt();
-        scanning = true;
-        scanButton.setText("ОСТАНОВИТЬ ПОИСК");
-        setStatus("Ищу G10…");
-
-        bleScanner.startScan(scanCallback);
-
-        mainHandler.postDelayed(() -> {
-            if (scanning) {
-                stopScan();
-                setStatus("G10 не найден — попробуй ещё раз");
-            }
-        }, 15000);
-    }
-
-    private void stopScan() {
-        if (!scanning) return;
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-                checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN)
-                        != PackageManager.PERMISSION_GRANTED) {
-            scanning = false;
-            scanButton.setText("НАЙТИ И ПОДКЛЮЧИТЬ G10");
-            return;
-        }
-
-        if (bleScanner != null) {
-            bleScanner.stopScan(scanCallback);
-        }
-        scanning = false;
-        scanButton.setText("НАЙТИ И ПОДКЛЮЧИТЬ G10");
-    }
-
-    private final ScanCallback scanCallback = new ScanCallback() {
-        @Override
-        public void onScanResult(int callbackType, ScanResult result) {
-            String name = null;
-
-            if (result.getScanRecord() != null) {
-                name = result.getScanRecord().getDeviceName();
-            }
-
-            if (name == null &&
-                    (Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
-                     checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
-                             == PackageManager.PERMISSION_GRANTED)) {
-                try {
-                    name = result.getDevice().getName();
-                } catch (SecurityException ignored) {
-                }
-            }
-
-            if ("G10".equalsIgnoreCase(name)) {
-                stopScan();
-                setStatus("G10 найден, подключаюсь…");
-                connect(result.getDevice());
-            }
-        }
-
-        @Override
-        public void onScanFailed(int errorCode) {
-            runOnUiThread(() -> {
-                scanning = false;
-                scanButton.setText("НАЙТИ И ПОДКЛЮЧИТЬ G10");
-                setStatus("Ошибка BLE scan: " + errorCode);
-            });
-        }
-    };
-
-    private void connect(BluetoothDevice device) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-                checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
-                        != PackageManager.PERMISSION_GRANTED) {
-            setStatus("Нет BLUETOOTH_CONNECT");
-            return;
-        }
-
-        try {
-            gatt = device.connectGatt(
-                    this,
-                    false,
-                    gattCallback,
-                    BluetoothDevice.TRANSPORT_LE
-            );
-        } catch (SecurityException e) {
-            setStatus("Ошибка разрешения CONNECT");
-        }
-    }
-
-    private final BluetoothGattCallback gattCallback = new BluetoothGattCallback() {
-        @Override
-        public void onConnectionStateChange(BluetoothGatt bluetoothGatt, int status, int newState) {
-            if (newState == BluetoothProfile.STATE_CONNECTED) {
-                runOnUiThread(() -> setStatus("Подключено. Читаю сервисы…"));
-
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-                        checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
-                                != PackageManager.PERMISSION_GRANTED) {
-                    return;
-                }
-
-                try {
-                    bluetoothGatt.discoverServices();
-                } catch (SecurityException ignored) {
-                }
-            } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                runOnUiThread(() -> setStatus("Отключено"));
-            }
-        }
-
-        @Override
-        public void onServicesDiscovered(BluetoothGatt bluetoothGatt, int status) {
-            BluetoothGattService service = bluetoothGatt.getService(UUID_FFF0);
-            if (service == null) {
-                runOnUiThread(() -> setStatus("FFF0 не найден"));
-                return;
-            }
-
-            commandCharacteristic = service.getCharacteristic(UUID_FFF1);
-            notifyCharacteristic = service.getCharacteristic(UUID_FFF2);
-
-            if (notifyCharacteristic == null) {
-                runOnUiThread(() -> setStatus("FFF2 не найден"));
-                return;
-            }
-
-            final boolean fff1Present = commandCharacteristic != null;
-            runOnUiThread(() ->
-                    setStatus("FFF0 найден. FFF1: " +
-                            (fff1Present ? "есть" : "нет") +
-                            ". Подписываюсь на FFF2…")
-            );
-
-            enableNotifications(bluetoothGatt, notifyCharacteristic);
-        }
-
-        @Override
-        public void onDescriptorWrite(
-                BluetoothGatt bluetoothGatt,
-                BluetoothGattDescriptor descriptor,
-                int status
-        ) {
-            if (UUID_CCCD.equals(descriptor.getUuid())) {
-                runOnUiThread(() -> {
-                    if (status == BluetoothGatt.GATT_SUCCESS) {
-                        setStatus("FFF2 Notify активно — данные идут");
-                    } else {
-                        setStatus("Ошибка CCCD: " + status);
-                    }
-                });
-            }
-        }
-
-        @Override
-        @SuppressWarnings("deprecation")
-        public void onCharacteristicChanged(
-                BluetoothGatt bluetoothGatt,
-                BluetoothGattCharacteristic characteristic
-        ) {
-            if (UUID_FFF2.equals(characteristic.getUuid())) {
-                byte[] value = characteristic.getValue();
-                if (value != null) {
-                    handleFff2(value.clone());
-                }
-            }
-        }
-
-        @Override
-        public void onCharacteristicChanged(
-                BluetoothGatt bluetoothGatt,
-                BluetoothGattCharacteristic characteristic,
-                byte[] value
-        ) {
-            if (UUID_FFF2.equals(characteristic.getUuid()) && value != null) {
-                handleFff2(value.clone());
-            }
-        }
-    };
-
-    private void enableNotifications(
-            BluetoothGatt bluetoothGatt,
-            BluetoothGattCharacteristic characteristic
-    ) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-                checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
-                        != PackageManager.PERMISSION_GRANTED) {
-            runOnUiThread(() -> setStatus("Нет BLUETOOTH_CONNECT"));
-            return;
-        }
-
-        try {
-            boolean ok = bluetoothGatt.setCharacteristicNotification(characteristic, true);
-            if (!ok) {
-                runOnUiThread(() -> setStatus("setCharacteristicNotification=false"));
-                return;
-            }
-
-            BluetoothGattDescriptor cccd = characteristic.getDescriptor(UUID_CCCD);
-            if (cccd == null) {
-                runOnUiThread(() -> setStatus("CCCD у FFF2 не найден"));
-                return;
-            }
-
-            byte[] enable = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE;
-
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                int result = bluetoothGatt.writeDescriptor(cccd, enable);
-                if (result != 0) {
-                    runOnUiThread(() -> setStatus("writeDescriptor error: " + result));
-                }
-            } else {
-                //noinspection deprecation
-                cccd.setValue(enable);
-                //noinspection deprecation
-                boolean queued = bluetoothGatt.writeDescriptor(cccd);
-                if (!queued) {
-                    runOnUiThread(() -> setStatus("CCCD write не поставлен в очередь"));
-                }
-            }
-        } catch (SecurityException e) {
-            runOnUiThread(() -> setStatus("Ошибка Bluetooth permission"));
-        }
-    }
-
-    private void sendRideModeCommand(byte[] command, String label) {
-        if (!hasTelemetry) {
-            Toast.makeText(
-                    this,
-                    "Сначала дождись телеметрии FFF2",
-                    Toast.LENGTH_SHORT
-            ).show();
-            return;
-        }
-
-        if (currentSpeedKmh != 0 || currentMoving) {
-            Toast.makeText(
-                    this,
-                    "Команда заблокирована: самокат должен стоять, скорость 0 км/ч",
-                    Toast.LENGTH_LONG
-            ).show();
-            return;
-        }
-
-        if (gatt == null || commandCharacteristic == null) {
-            Toast.makeText(this, "FFF1 ещё не готов", Toast.LENGTH_SHORT).show();
-            return;
-        }
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-                checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
-                        != PackageManager.PERMISSION_GRANTED) {
-            Toast.makeText(this, "Нет BLUETOOTH_CONNECT", Toast.LENGTH_SHORT).show();
-            return;
-        }
-
-        try {
-            int properties = commandCharacteristic.getProperties();
-
-            int writeType =
-                    (properties & BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0
-                            ? BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
-                            : BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT;
-
-            boolean queued;
-
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                int result = gatt.writeCharacteristic(
-                        commandCharacteristic,
-                        command,
-                        writeType
-                );
-                queued = result == 0;
-            } else {
-                //noinspection deprecation
-                commandCharacteristic.setWriteType(writeType);
-                //noinspection deprecation
-                commandCharacteristic.setValue(command);
-                //noinspection deprecation
-                queued = gatt.writeCharacteristic(commandCharacteristic);
-            }
-
-            appendCsv(
-                    "FFF1_TX",
-                    UUID_FFF1.toString(),
-                    command.length,
-                    "",
-                    label,
-                    toHex(command),
-                    queued ? "mode_command_sent" : "mode_command_failed"
-            );
-
-            Toast.makeText(
-                    this,
-                    queued
-                            ? "Отправлено: " + toHex(command)
-                            : "Команда не отправлена",
-                    Toast.LENGTH_SHORT
-            ).show();
-
-        } catch (SecurityException e) {
-            Toast.makeText(this, "Bluetooth permission error", Toast.LENGTH_LONG).show();
-        }
-    }
-
-    private void handleFff2(byte[] packet) {
-        if (packet.length >= 4 &&
-                u8(packet[0]) == 0xF1 &&
-                u8(packet[1]) == 0x13) {
-
-            boolean cruiseEnabled = u8(packet[3]) == 0x01;
-            String hex = toHex(packet);
-
-            appendCsv(
-                    "PROTOCOL_RX",
-                    UUID_FFF2.toString(),
-                    packet.length,
-                    "",
-                    currentMarker,
-                    hex,
-                    "CRUISE_CONFIG_RESPONSE;enabled=" + cruiseEnabled +
-                            ";stateByte=" + u8(packet[3])
-            );
-
-            runOnUiThread(() -> {
-                cruiseEnabledText.setText(
-                        "Круиз разрешён: " + (cruiseEnabled ? "ДА" : "НЕТ")
-                );
-                Toast.makeText(
-                        this,
-                        "Ответ Cruise: " + (cruiseEnabled ? "РАЗРЕШЁН" : "ЗАПРЕЩЁН"),
-                        Toast.LENGTH_LONG
-                ).show();
-            });
-            return;
-        }
-
-        if (packet.length < 20) {
-            appendCsv("FFF2_NOTIFY", UUID_FFF2.toString(), packet.length,
-                    "", currentMarker, toHex(packet), "short_packet");
-            return;
-        }
-
-        packetCount++;
-
-        int speedKmh = u8(packet[12]);
-        int raw16 = u8(packet[10]) | (u8(packet[11]) << 8);
-
-        int batteryRaw = u8(packet[4]) | (u8(packet[5]) << 8);
-        double batteryVoltage = batteryRaw / 100.0;
-
-        int flags = u8(packet[18]);
-        boolean moving = (flags & 0x02) != 0;
-        boolean cruise = (flags & 0x04) != 0;
-        boolean brake = (flags & 0x08) != 0;
-
-        hasTelemetry = true;
-        currentSpeedKmh = speedKmh;
-        currentMoving = moving;
-
-        String changed = changedIndexes(previousPacket, packet);
-        previousPacket = packet.clone();
-
-        String hex = toHex(packet);
-
-        appendCsv(
-                "FFF2_NOTIFY",
-                UUID_FFF2.toString(),
-                packet.length,
-                changed,
-                currentMarker,
-                hex,
-                "speed=" + speedKmh +
-                        ";raw16=" + raw16 +
-                        ";batteryV=" + String.format(Locale.US, "%.2f", batteryVoltage) +
-                        ";flags18=0x" + String.format(Locale.US, "%02X", flags)
-        );
-
-        final long count = packetCount;
-
-        runOnUiThread(() -> {
-            speedText.setText("Скорость: " + speedKmh + " км/ч");
-            batteryText.setText(
-                    "Батарея: " + String.format(Locale.US, "%.2f", batteryVoltage) + " В"
-            );
-            rawText.setText(
-                    "RAW speed: " + raw16 +
-                    "   byte[12]: " + speedKmh +
-                    "   byte[18]: 0x" + String.format(Locale.US, "%02X", flags)
-            );
-            motionText.setText("Движение: " + (moving ? "ДА" : "НЕТ"));
-            cruiseText.setText("Круиз активен: " + (cruise ? "ДА" : "НЕТ"));
-            brakeText.setText("Тормоз: " + (brake ? "ВКЛ" : "ВЫКЛ"));
-            packetText.setText("Пакетов: " + count);
-
-            String line =
-                    String.format(
-                            Locale.US,
-                            "%s  %2d km/h  f=%02X  %s",
-                            shortTime(),
-                            speedKmh,
-                            flags,
-                            hex
-                    );
-
-            visibleHexLines.addFirst(line);
-            while (visibleHexLines.size() > MAX_VISIBLE_HEX_LINES) {
-                visibleHexLines.removeLast();
-            }
-
-            StringBuilder sb = new StringBuilder();
-            for (String s : visibleHexLines) {
-                sb.append(s).append('\n');
-            }
-            hexText.setText(sb.toString());
-        });
-    }
-
-    private int u8(byte value) {
-        return value & 0xFF;
-    }
-
-    private String changedIndexes(byte[] oldPacket, byte[] newPacket) {
-        if (oldPacket == null || oldPacket.length != newPacket.length) {
-            return "";
-        }
-
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < newPacket.length; i++) {
-            if (oldPacket[i] != newPacket[i]) {
-                if (sb.length() > 0) sb.append(';');
-                sb.append(i);
-            }
-        }
-        return sb.toString();
-    }
-
-    private String toHex(byte[] data) {
-        StringBuilder sb = new StringBuilder(data.length * 3);
-        for (int i = 0; i < data.length; i++) {
-            if (i > 0) sb.append(' ');
-            sb.append(String.format(Locale.US, "%02X", data[i] & 0xFF));
-        }
-        return sb.toString();
-    }
-
-    private void setMarker(String marker) {
-        currentMarker = marker;
-        modeText.setText("Метка режима: " + marker);
-
-        appendCsv(
-                "MARKER",
-                "",
-                0,
-                "",
-                marker,
-                "",
-                "Метка теста: " + marker
-        );
-    }
-
-    private synchronized void resetCsv() {
-        csvRows.clear();
-        csvRows.add("time,source,uuid,length,changed_indexes,marker,hex,ascii_or_note");
-    }
-
-    private void clearLog() {
-        packetCount = 0;
-        previousPacket = null;
-        currentMarker = "";
-        hasTelemetry = false;
-        currentSpeedKmh = -1;
-        currentMoving = false;
-        visibleHexLines.clear();
-        resetCsv();
-
-        speedText.setText("Скорость: — км/ч");
-        batteryText.setText("Батарея: — В");
-        rawText.setText("RAW speed: —   byte[12]: —");
-        motionText.setText("Движение: —");
-        cruiseText.setText("Круиз активен: —");
-        cruiseEnabledText.setText("Круиз разрешён: НЕИЗВЕСТНО");
-        brakeText.setText("Тормоз: —");
-        modeText.setText("Метка режима: —");
-        packetText.setText("Пакетов: 0");
-        hexText.setText("—");
-
-        Toast.makeText(this, "Журнал очищен", Toast.LENGTH_SHORT).show();
-    }
-
-    private synchronized void appendCsv(
-            String source,
-            String uuid,
-            int length,
-            String changed,
-            String marker,
-            String hex,
-            String note
-    ) {
-        csvRows.add(
-                csv(timestamp()) + "," +
-                csv(source) + "," +
-                csv(uuid) + "," +
-                csv(String.valueOf(length)) + "," +
-                csv(changed) + "," +
-                csv(marker) + "," +
-                csv(hex) + "," +
-                csv(note)
-        );
-    }
-
-    private String csv(String value) {
-        if (value == null) value = "";
-        return "\"" + value.replace("\"", "\"\"") + "\"";
-    }
-
-    private String timestamp() {
-        synchronized (timestampFormat) {
-            return timestampFormat.format(new Date());
-        }
-    }
-
-    private String shortTime() {
-        return new SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(new Date());
-    }
-
-    private void exportCsv() {
-        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
-        intent.addCategory(Intent.CATEGORY_OPENABLE);
-        intent.setType("text/csv");
-        intent.putExtra(
-                Intent.EXTRA_TITLE,
-                "g10_ble_" +
-                        new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date()) +
-                        ".csv"
-        );
-        startActivityForResult(intent, REQ_CREATE_CSV);
     }
 
     @Override
-    @SuppressWarnings("deprecation")
+    public void onBleStatus(String status) {
+        runOnUiThread(() -> connectionText.setText("BLE: " + status));
+    }
+
+    @Override
+    public void onGattSummary(String summary) {
+        runOnUiThread(() -> {
+            gattText.setText(summary);
+            refreshLab();
+        });
+    }
+
+    @Override
+    public void onTelemetry(G10BleManager.Telemetry t) {
+        runOnUiThread(() -> {
+            speedText.setText(String.valueOf(t.speedKmh));
+            batteryText.setText(String.format(Locale.US, "Батарея: %.2f В", t.batteryVoltage));
+            modeText.setText("Режим: " + t.modeLabel);
+            cruiseText.setText("Круиз активен: " + (t.cruiseActive ? "ДА" : "НЕТ"));
+            brakeText.setText("Тормоз: " + (t.brake ? "ДА" : "НЕТ"));
+        });
+
+        trips.onTelemetry(t);
+        batteryCoach.updateTelemetry(t.speedKmh, t.batteryVoltage, t.modeLabel);
+        refreshBatteryAi();
+        refreshTripUi();
+    }
+
+    @Override
+    public void onLabUpdated() {
+        runOnUiThread(this::refreshLab);
+    }
+
+    private void refreshLab() {
+        if (protocolText == null) return;
+        protocolText.setText(ble.getProtocolSummary());
+        gattText.setText(ble.getGattSummary());
+        labCountText.setText("LAB rows: " + ble.getLabRowCount());
+        hexText.setText(ble.getRecentHex());
+    }
+
+    @Override
+    public void onTripStateChanged() {
+        runOnUiThread(() -> {
+            refreshTripUi();
+            refreshHistory();
+            refreshBatteryAi();
+        });
+    }
+
+    @Override
+    public void onLocationChanged(TripTracker.TripPoint point) {
+        runOnUiThread(() -> {
+            locationText.setText(String.format(
+                    Locale.US,
+                    "GPS: %.6f, %.6f   ±%.0f м   alt %.1f м",
+                    point.latitude, point.longitude, point.accuracy, point.altitude));
+            trackView.setPoints(trips.getPointsSnapshot());
+            refreshTripUi();
+        });
+    }
+
+    @Override
+    public void onTripFinished(TripTracker.TripSummary summary) {
+        batteryCoach.observeTrip(summary.analysis);
+        runOnUiThread(() -> {
+            Toast.makeText(
+                    this,
+                    String.format(Locale.US, "Поездка сохранена: %.2f км", summary.distanceKm),
+                    Toast.LENGTH_LONG
+            ).show();
+            refreshHistory();
+            refreshBatteryAi();
+        });
+    }
+
+    private void refreshTripUi() {
+        if (tripStateText == null) return;
+
+        String state = trips.isTripActive()
+                ? (trips.isManualTrip() ? "АКТИВНА (manual)" : "АКТИВНА (auto)")
+                : "ожидание";
+
+        tripStateText.setText("Состояние: " + state);
+
+        long sec = trips.getDurationSeconds();
+        double km = trips.getDistanceKm();
+        double avg = sec > 0 ? km / (sec / 3600.0) : 0.0;
+        TripAnalysisEngine.Result analysis = trips.getLastAnalysis();
+        if (!trips.isTripActive() && analysis != null) {
+            km = analysis.distanceKm;
+            sec = analysis.movingSeconds;
+            avg = analysis.averageMovingSpeedKmh;
+        }
+
+        String extra = analysis != null && !trips.isTripActive()
+                ? String.format(
+                        Locale.US,
+                        "\nНабор высоты: %.0f м\nGPS: %.0f%% • нагрузка: %.0f/100",
+                        analysis.elevationGainM,
+                        analysis.gpsQualityPercent,
+                        analysis.loadIndex
+                )
+                : "";
+
+        tripStatsText.setText(String.format(
+                        Locale.US,
+                        "Дистанция: %.2f км\nВремя движения: %02d:%02d\nСредняя: %.1f км/ч\n" +
+                                "Макс BLE: %d км/ч\nТочек GPS: %d",
+                        km,
+                        sec / 60,
+                        sec % 60,
+                        avg,
+                        trips.getMaxBleSpeed(),
+                        trips.getPointCount()
+                ) + extra);
+
+        tripMiniText.setText(
+                trips.isTripActive()
+                        ? String.format(Locale.US, "Поездка: %.2f км", km)
+                        : "Поездка: не активна"
+        );
+
+        if (trackView != null) {
+            trackView.setPoints(trips.getPointsSnapshot());
+        }
+    }
+
+    private void refreshHistory() {
+        if (historyText == null) return;
+        List<String> h = trips.getHistory();
+        if (h.isEmpty()) {
+            historyText.setText("Пока нет завершённых поездок.");
+            return;
+        }
+        StringBuilder sb = new StringBuilder();
+        for (String s : h) {
+            sb.append(s).append('\n');
+        }
+        historyText.setText(sb.toString().trim());
+    }
+
+    private void refreshBatteryAi() {
+        if (aiVoltageText == null) return;
+
+        double v = batteryCoach.getCurrentVoltage();
+        aiVoltageText.setText(v > 0
+                ? String.format(Locale.US, "Напряжение: %.2f В", v)
+                : "Напряжение: —");
+
+        double soc = batteryCoach.getSocEstimatePercent();
+        aiSocText.setText(soc >= 0
+                ? String.format(Locale.US, "SOC: ~%.0f%% (оценка по напряжению)", soc)
+                : "SOC: —");
+
+        double sag = batteryCoach.getCurrentSag();
+        aiSagText.setText(sag >= 0
+                ? String.format(
+                        Locale.US,
+                        "Текущая просадка: %.2f В • восстановление: %.2f В",
+                        sag,
+                        batteryCoach.getLatestRecoveryVoltage()
+                )
+                : "Текущая просадка: —");
+
+        if (batteryCoach.hasLearnedEfficiency()) {
+            double modeRate = batteryCoach.getModeKmPerVolt(batteryCoach.getCurrentMode());
+            aiEfficiencyText.setText(String.format(
+                    Locale.US,
+                    "Эффективность: %.2f км/В%s",
+                    batteryCoach.getKmPerVolt(),
+                    modeRate > 0
+                            ? String.format(
+                                    Locale.US,
+                                    " • %s %.2f км/В",
+                                    batteryCoach.getCurrentMode(),
+                                    modeRate
+                            )
+                            : ""
+            ));
+        } else {
+            aiEfficiencyText.setText("Обученная эффективность: данных мало");
+        }
+
+        double range = batteryCoach.getForecastRangeKm();
+        if (range >= 0) {
+            aiRangeText.setText(String.format(
+                    Locale.US,
+                    "Прогноз до %.1f В: ~%.1f км • %s • %.0f°C",
+                    batteryCoach.getReserveVoltage(),
+                    range,
+                    batteryCoach.getCurrentMode(),
+                    batteryCoach.getTemperatureC()
+            ));
+        } else {
+            aiRangeText.setText("Прогноз запаса: обучается");
+        }
+
+        double health = batteryCoach.getHealthTrendPercent();
+        aiHealthText.setText(health >= 0
+                ? String.format(
+                        Locale.US,
+                        "Тренд SOH: ~%.0f%% от лучших сопоставимых поездок",
+                        health
+                )
+                : "Тренд SOH: нужны минимум 5 обучающих поездок");
+
+        aiConfidenceText.setText(
+                "Уверенность прогноза: " + batteryCoach.getConfidencePercent() + "%"
+        );
+
+        aiLearningText.setText(
+                "Обучающих поездок: " + batteryCoach.getLearningTripCount()
+        );
+
+        aiVerdictText.setText("Вердикт: " + batteryCoach.getVerdict());
+        aiTripReportText.setText(batteryCoach.getLastTripReport());
+
+        double energyWh = batteryCoach.getNominalEnergyWh();
+        aiProfileText.setText(String.format(
+                Locale.US,
+                "Полный %.1f В • резерв %.1f В • ёмкость %s • %.0f°C • циклы %d%s",
+                batteryCoach.getFullVoltage(),
+                batteryCoach.getReserveVoltage(),
+                batteryCoach.getCapacityAh() > 0
+                        ? String.format(Locale.US, "%.1f А·ч", batteryCoach.getCapacityAh())
+                        : "не задана",
+                batteryCoach.getTemperatureC(),
+                batteryCoach.getCycleCount(),
+                energyWh > 0
+                        ? String.format(Locale.US, " • номинально ~%.0f Вт·ч", energyWh)
+                        : ""
+        ));
+    }
+
+    private void exportLab() {
+        pendingExport = ExportKind.LAB;
+        createDocument(
+                "g10_lab_" + fileStamp.format(new Date()) + ".csv",
+                "text/csv"
+        );
+    }
+
+    private boolean ensureTripForExport() {
+        if (trips.hasTripData() && trips.getPointCount() > 0) return true;
+        Toast.makeText(this, "Нет данных поездки для экспорта", Toast.LENGTH_SHORT).show();
+        return false;
+    }
+
+    private void exportTripCsv() {
+        if (!ensureTripForExport()) return;
+        pendingExport = ExportKind.TRIP_CSV;
+        createDocument(
+                "g10_trip_" + fileStamp.format(new Date()) + ".csv",
+                "text/csv"
+        );
+    }
+
+    private void exportTripGpx() {
+        if (!ensureTripForExport()) return;
+        pendingExport = ExportKind.TRIP_GPX;
+        createDocument(
+                "g10_trip_" + fileStamp.format(new Date()) + ".gpx",
+                "application/gpx+xml"
+        );
+    }
+
+    private void exportTripKml() {
+        if (!ensureTripForExport()) return;
+        pendingExport = ExportKind.TRIP_KML;
+        createDocument(
+                "g10_trip_" + fileStamp.format(new Date()) + ".kml",
+                "application/vnd.google-earth.kml+xml"
+        );
+    }
+
+    private void exportTripReport() {
+        if (trips.getLastAnalysis() == null) {
+            Toast.makeText(this, "Нет данных поездки для экспорта", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        pendingExport = ExportKind.TRIP_REPORT;
+        createDocument(
+                "g10_trip_report_" + fileStamp.format(new Date()) + ".txt",
+                "text/plain"
+        );
+    }
+
+    private void exportBackup() {
+        pendingExport = ExportKind.BACKUP;
+        createDocument(
+                "g10_backup_" + fileStamp.format(new Date()) + ".json",
+                "application/json"
+        );
+    }
+
+    private void importBackup() {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("application/json");
+        startActivityForResult(i, REQ_IMPORT_BACKUP);
+    }
+
+    private void createDocument(String name, String mimeType) {
+        Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType(mimeType);
+        i.putExtra(Intent.EXTRA_TITLE, name);
+        startActivityForResult(i, REQ_EXPORT);
+    }
+
+    @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
 
-        if (requestCode != REQ_CREATE_CSV ||
-                resultCode != RESULT_OK ||
-                data == null ||
-                data.getData() == null) {
+        if (requestCode == REQ_IMPORT_BACKUP) {
+            if (resultCode != RESULT_OK || data == null || data.getData() == null) return;
+            try {
+                AppDataBackup.importJson(this, readText(data.getData()));
+                trips.setReserveVoltage(batteryCoach.getReserveVoltage());
+                loadProfileInputs();
+                refreshHistory();
+                refreshBatteryAi();
+                Toast.makeText(this, "Резервная копия восстановлена", Toast.LENGTH_LONG).show();
+            } catch (Exception e) {
+                Toast.makeText(
+                        this,
+                        "Ошибка восстановления: " + e.getMessage(),
+                        Toast.LENGTH_LONG
+                ).show();
+            }
+            return;
+        }
+
+        if (requestCode != REQ_EXPORT || resultCode != RESULT_OK ||
+                data == null || data.getData() == null) {
+            pendingExport = ExportKind.NONE;
             return;
         }
 
         Uri uri = data.getData();
-        writeCsv(uri);
-    }
-
-    private void writeCsv(Uri uri) {
-        final List<String> snapshot;
-        synchronized (this) {
-            snapshot = new ArrayList<>(csvRows);
-        }
 
         try {
-            ContentResolver resolver = getContentResolver();
-            try (OutputStream out = resolver.openOutputStream(uri, "w")) {
-                if (out == null) throw new IllegalStateException("OutputStream=null");
-
-                for (String row : snapshot) {
-                    out.write(row.getBytes(StandardCharsets.UTF_8));
-                    out.write('\n');
-                }
+            String text;
+            switch (pendingExport) {
+                case LAB:
+                    text = ble.getLabCsv();
+                    break;
+                case TRIP_GPX:
+                    text = trips.getTripGpx();
+                    break;
+                case TRIP_KML:
+                    text = trips.getTripKml();
+                    break;
+                case TRIP_REPORT:
+                    text = trips.getAnalysisReport();
+                    break;
+                case BACKUP:
+                    text = AppDataBackup.exportJson(this);
+                    break;
+                case TRIP_CSV:
+                default:
+                    text = trips.getTripCsv();
+                    break;
             }
-            Toast.makeText(this, "CSV сохранён", Toast.LENGTH_SHORT).show();
+
+            ContentResolver resolver = getContentResolver();
+            try (OutputStream os = resolver.openOutputStream(uri)) {
+                if (os == null) throw new IllegalStateException("output stream is null");
+                os.write(text.getBytes(StandardCharsets.UTF_8));
+            }
+            Toast.makeText(this, "Файл сохранён", Toast.LENGTH_SHORT).show();
         } catch (Exception e) {
-            Toast.makeText(
-                    this,
-                    "Ошибка CSV: " + e.getMessage(),
-                    Toast.LENGTH_LONG
-            ).show();
+            Toast.makeText(this, "Ошибка экспорта: " + e.getMessage(), Toast.LENGTH_LONG).show();
         }
+
+        pendingExport = ExportKind.NONE;
     }
 
-    private void setStatus(String text) {
-        runOnUiThread(() -> statusText.setText("Статус: " + text));
-    }
-
-    private void closeGatt() {
-        if (gatt == null) return;
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-                checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
-                        != PackageManager.PERMISSION_GRANTED) {
-            gatt = null;
-            return;
+    private String readText(Uri uri) throws Exception {
+        try (InputStream input = getContentResolver().openInputStream(uri);
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            if (input == null) throw new IllegalStateException("input stream is null");
+            byte[] buffer = new byte[8192];
+            int read;
+            int total = 0;
+            while ((read = input.read(buffer)) != -1) {
+                total += read;
+                if (total > 5_000_000) {
+                    throw new IllegalStateException("резервная копия больше 5 МБ");
+                }
+                output.write(buffer, 0, read);
+            }
+            return output.toString(StandardCharsets.UTF_8.name());
         }
-
-        try {
-            gatt.close();
-        } catch (SecurityException ignored) {
-        }
-
-        gatt = null;
-        commandCharacteristic = null;
-        notifyCharacteristic = null;
-        hasTelemetry = false;
-        currentSpeedKmh = -1;
-        currentMoving = false;
     }
 
     @Override
     protected void onDestroy() {
-        stopScan();
-        closeGatt();
+        trips.stopMonitoring();
+        ble.close();
         super.onDestroy();
     }
 }
