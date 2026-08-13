@@ -183,7 +183,9 @@ public class TripTracker {
         monitoring = false;
     }
 
-    private final LocationListener locationListener = location -> {
+    private final LocationListener locationListener = this::handleLocation;
+
+    private void handleLocation(Location location) {
         if (location == null) return;
 
         TripPoint point = new TripPoint(
@@ -213,7 +215,7 @@ public class TripTracker {
 
         listener.onLocationChanged(point);
         listener.onTripStateChanged();
-    };
+    }
 
     public void onTelemetry(G10BleManager.Telemetry t) {
         telemetry = t;
