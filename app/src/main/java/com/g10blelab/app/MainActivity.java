@@ -1,11 +1,15 @@
 package com.g10blelab.app;
 
 import android.Manifest;
+import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.content.ContentResolver;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.graphics.Color;
 import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -13,18 +17,24 @@ import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
+import android.webkit.JavascriptInterface;
+import android.webkit.WebResourceRequest;
+import android.webkit.WebView;
+import android.webkit.WebViewClient;
 
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
@@ -45,16 +55,19 @@ public class MainActivity extends Activity
     private G10BleManager ble;
     private TripTracker trips;
     private BatteryCoach batteryCoach;
+    private SharedPreferences routePrefs;
 
     private final SimpleDateFormat fileStamp =
             new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US);
 
     private FrameLayout content;
     private View dashboardTab;
+    private View routeTab;
     private View tripTab;
     private View mapTab;
     private View batteryTab;
     private View labTab;
+    private final List<Button> navigationButtons = new ArrayList<>();
 
     private TextView connectionText;
     private TextView speedText;
@@ -63,6 +76,30 @@ public class MainActivity extends Activity
     private TextView cruiseText;
     private TextView brakeText;
     private TextView tripMiniText;
+    private TextView dashboardSocText;
+    private TextView dashboardRangeText;
+    private TextView dashboardRouteText;
+
+    private WebView routeWebView;
+    private boolean routeMapReady = false;
+    private double latestLatitude = Double.NaN;
+    private double latestLongitude = Double.NaN;
+    private double routeDestinationLatitude = Double.NaN;
+    private double routeDestinationLongitude = Double.NaN;
+    private String routeDestinationLabel = "Точка на карте";
+    private String selectedRouteProfile = RouteEnergyEstimator.PROFILE_BALANCED;
+    private EditText routeDistanceInput;
+    private EditText routeLoadInput;
+    private EditText routeClimbInput;
+    private CheckBox routeRoundTripInput;
+    private TextView routeDestinationText;
+    private TextView routeResultText;
+    private TextView routeDetailsText;
+    private TextView routeAssumptionsText;
+    private Button routeEcoButton;
+    private Button routeBalancedButton;
+    private Button routeFastButton;
+    private RouteEnergyEstimator.Result lastRouteResult;
 
     private TextView tripStateText;
     private TextView tripStatsText;
@@ -100,6 +137,10 @@ public class MainActivity extends Activity
         ble = new G10BleManager(this, this);
         trips = new TripTracker(this, this);
         batteryCoach = new BatteryCoach(this);
+        routePrefs = getSharedPreferences("g10_route_planner", MODE_PRIVATE);
+        selectedRouteProfile = RouteEnergyEstimator.normalizeProfile(
+                routePrefs.getString("profile", RouteEnergyEstimator.PROFILE_BALANCED)
+        );
         trips.setReserveVoltage(batteryCoach.getReserveVoltage());
 
         buildUi();
@@ -115,59 +156,73 @@ public class MainActivity extends Activity
     private void buildUi() {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(10), dp(10), dp(10), dp(8));
+        root.setPadding(dp(10), dp(8), dp(10), dp(8));
+        root.setBackgroundColor(Color.parseColor("#0B1118"));
 
         TextView title = new TextView(this);
-        title.setText("G10 Companion  v0.5.0 Alpha");
-        title.setTextSize(22);
+        title.setText("G10 DRIVE");
+        title.setTextSize(24);
+        title.setTextColor(Color.parseColor("#F4F7FA"));
         title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         title.setGravity(Gravity.CENTER_HORIZONTAL);
         root.addView(title, fullWidth());
 
         TextView subtitle = new TextView(this);
-        subtitle.setText("Поездки • локальная аналитика • Battery AI • LAB");
+        subtitle.setText("v0.6 Alpha • маршрут • реальный прогноз батареи");
         subtitle.setTextSize(12);
+        subtitle.setTextColor(Color.parseColor("#8FA6B5"));
         subtitle.setGravity(Gravity.CENTER_HORIZONTAL);
-        subtitle.setPadding(0, 0, 0, dp(8));
+        subtitle.setPadding(0, 0, 0, dp(6));
         root.addView(subtitle, fullWidth());
 
-        LinearLayout tabs = new LinearLayout(this);
-        tabs.setOrientation(LinearLayout.HORIZONTAL);
-        root.addView(tabs, fullWidth());
+        LinearLayout mainTabs = new LinearLayout(this);
+        mainTabs.setOrientation(LinearLayout.HORIZONTAL);
+        root.addView(mainTabs, fullWidth());
 
         Button bDash = tabButton("ГЛАВНАЯ");
+        Button bRoute = tabButton("МАРШРУТ");
         Button bTrip = tabButton("ПОЕЗДКА");
-        Button bMap = tabButton("КАРТА");
-        Button bAi = tabButton("BAT AI");
+        Button bAi = tabButton("БАТАРЕЯ");
+
+        mainTabs.addView(bDash, weighted());
+        mainTabs.addView(bRoute, weighted());
+        mainTabs.addView(bTrip, weighted());
+        mainTabs.addView(bAi, weighted());
+
+        LinearLayout serviceTabs = new LinearLayout(this);
+        serviceTabs.setOrientation(LinearLayout.HORIZONTAL);
+        root.addView(serviceTabs, fullWidth());
+
+        Button bMap = tabButton("ТРЕК GPS");
         Button bLab = tabButton("LAB");
 
-        tabs.addView(bDash, weighted());
-        tabs.addView(bTrip, weighted());
-        tabs.addView(bMap, weighted());
-        tabs.addView(bAi, weighted());
-        tabs.addView(bLab, weighted());
+        serviceTabs.addView(bMap, weighted());
+        serviceTabs.addView(bLab, weighted());
 
         content = new FrameLayout(this);
         root.addView(content, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
 
         dashboardTab = buildDashboard();
+        routeTab = buildRouteTab();
         tripTab = buildTripTab();
         mapTab = buildMapTab();
         batteryTab = buildBatteryTab();
         labTab = buildLabTab();
 
         content.addView(dashboardTab);
+        content.addView(routeTab);
         content.addView(tripTab);
         content.addView(mapTab);
         content.addView(batteryTab);
         content.addView(labTab);
 
-        bDash.setOnClickListener(v -> showTab(dashboardTab));
-        bTrip.setOnClickListener(v -> showTab(tripTab));
-        bMap.setOnClickListener(v -> showTab(mapTab));
-        bAi.setOnClickListener(v -> showTab(batteryTab));
-        bLab.setOnClickListener(v -> showTab(labTab));
+        registerNavigation(bDash, dashboardTab, false);
+        registerNavigation(bRoute, routeTab, true);
+        registerNavigation(bTrip, tripTab, false);
+        registerNavigation(bAi, batteryTab, false);
+        registerNavigation(bMap, mapTab, true);
+        registerNavigation(bLab, labTab, false);
 
         setContentView(root);
         showTab(dashboardTab);
@@ -176,33 +231,55 @@ public class MainActivity extends Activity
     private View buildDashboard() {
         LinearLayout box = verticalBox();
 
-        connectionText = field(box, "BLE: не подключено", 15, true);
+        LinearLayout connectCard = card(box);
+        connectionText = field(connectCard, "● G10 не подключён", 15, true);
+        connectionText.setTextColor(Color.parseColor("#FFB020"));
 
         Button connect = new Button(this);
-        connect.setText("НАЙТИ И ПОДКЛЮЧИТЬ G10");
+        connect.setText("ПОДКЛЮЧИТЬ G10");
+        stylePrimaryButton(connect);
         connect.setOnClickListener(v -> ensureBleAndScan());
-        box.addView(connect, fullWidth());
+        connectCard.addView(connect, fullWidth());
 
-        speedText = field(box, "0", 58, true);
+        LinearLayout driveCard = card(box);
+        speedText = field(driveCard, "0", 64, true);
         speedText.setGravity(Gravity.CENTER_HORIZONTAL);
+        speedText.setTextColor(Color.parseColor("#FFFFFF"));
 
-        TextView kmh = field(box, "км/ч", 14, false);
+        TextView kmh = field(driveCard, "км/ч", 14, false);
         kmh.setGravity(Gravity.CENTER_HORIZONTAL);
+        kmh.setTextColor(Color.parseColor("#8FA6B5"));
 
-        batteryText = field(box, "Батарея: — В", 26, true);
+        dashboardSocText = field(driveCard, "БАТАРЕЯ —", 28, true);
+        dashboardSocText.setGravity(Gravity.CENTER_HORIZONTAL);
+        dashboardSocText.setTextColor(Color.parseColor("#58D68D"));
+
+        batteryText = field(driveCard, "— В", 17, false);
         batteryText.setGravity(Gravity.CENTER_HORIZONTAL);
+        dashboardRangeText = field(driveCard, "Запас хода появится после подключения", 16, true);
+        dashboardRangeText.setGravity(Gravity.CENTER_HORIZONTAL);
 
-        modeText = field(box, "Режим: —", 20, true);
-        cruiseText = field(box, "Круиз активен: НЕТ", 18, true);
-        brakeText = field(box, "Тормоз: НЕТ", 18, true);
-        tripMiniText = field(box, "Поездка: не активна", 16, false);
+        LinearLayout routeCard = card(box);
+        field(routeCard, "ПОСЛЕДНИЙ МАРШРУТ", 13, true)
+                .setTextColor(Color.parseColor("#8FA6B5"));
+        dashboardRouteText = field(routeCard, "Маршрут ещё не выбран", 19, true);
+        Button planRoute = new Button(this);
+        planRoute.setText("ВЫБРАТЬ МАРШРУТ");
+        stylePrimaryButton(planRoute);
+        planRoute.setOnClickListener(v -> {
+            ensureLocationPermission();
+            showTab(routeTab);
+        });
+        routeCard.addView(planRoute, fullWidth());
 
-        TextView modeTitle = field(box, "Режим движения", 14, true);
-        modeTitle.setPadding(0, dp(12), 0, dp(3));
+        LinearLayout modeCard = card(box);
+        modeText = field(modeCard, "Режим: —", 18, true);
+        TextView modeTitle = field(modeCard, "Выбор режима при остановке", 13, false);
+        modeTitle.setTextColor(Color.parseColor("#8FA6B5"));
 
         LinearLayout modes = new LinearLayout(this);
         modes.setOrientation(LinearLayout.HORIZONTAL);
-        box.addView(modes, fullWidth());
+        modeCard.addView(modes, fullWidth());
 
         Button eco = modeButton("ECO", 1);
         Button sport = modeButton("SPORT", 2);
@@ -211,14 +288,163 @@ public class MainActivity extends Activity
         modes.addView(sport, weighted());
         modes.addView(race, weighted());
 
-        TextView safety = field(
+        LinearLayout stateCard = card(box);
+        cruiseText = field(stateCard, "Круиз: НЕТ", 15, true);
+        brakeText = field(stateCard, "Тормоз: НЕТ", 15, true);
+        tripMiniText = field(stateCard, "Поездка: не активна", 15, false);
+
+        return wrap(box);
+    }
+
+    @SuppressLint({"SetJavaScriptEnabled", "AddJavascriptInterface"})
+    private View buildRouteTab() {
+        LinearLayout box = verticalBox();
+
+        field(box, "МАРШРУТ И ЗАРЯД", 23, true);
+        TextView intro = field(
                 box,
-                "Команды режима отправляются только при полученной телеметрии, скорости 0 и отсутствии движения.",
+                "Выберите точку на карте или найдите адрес. Приложение построит варианты и сразу покажет остаток батареи.",
+                13,
+                false
+        );
+        intro.setTextColor(Color.parseColor("#AFC0CC"));
+
+        routeDestinationText = field(box, "Куда: точка не выбрана", 15, true);
+
+        routeWebView = new WebView(this);
+        routeWebView.setBackgroundColor(Color.parseColor("#101820"));
+        routeWebView.getSettings().setJavaScriptEnabled(true);
+        routeWebView.getSettings().setDomStorageEnabled(true);
+        routeWebView.getSettings().setUserAgentString(
+                "G10-Companion/0.6 Android personal route planner"
+        );
+        routeWebView.addJavascriptInterface(new RouteMapBridge(), "G10Route");
+        routeWebView.setWebViewClient(new WebViewClient() {
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                routeMapReady = true;
+                pushLocationToRouteMap();
+            }
+
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                Uri uri = request.getUrl();
+                if (uri != null && "file".equalsIgnoreCase(uri.getScheme())) return false;
+                try {
+                    startActivity(new Intent(Intent.ACTION_VIEW, uri));
+                } catch (Exception ignored) {
+                }
+                return true;
+            }
+        });
+        routeWebView.loadUrl("file:///android_asset/route_map.html");
+        LinearLayout.LayoutParams mapParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(380)
+        );
+        mapParams.setMargins(0, dp(6), 0, dp(8));
+        box.addView(routeWebView, mapParams);
+
+        LinearLayout settingsCard = card(box);
+        field(settingsCard, "ПАРАМЕТРЫ РАСЧЁТА", 14, true)
+                .setTextColor(Color.parseColor("#8FA6B5"));
+
+        field(settingsCard, "Расстояние в одну сторону, км", 12, false)
+                .setTextColor(Color.parseColor("#8FA6B5"));
+
+        LinearLayout distanceRow = new LinearLayout(this);
+        distanceRow.setOrientation(LinearLayout.HORIZONTAL);
+        settingsCard.addView(distanceRow, fullWidth());
+
+        routeDistanceInput = decimalInput(
+                "Расстояние в одну сторону, км",
+                routePrefs.getFloat("distance_km", 0f),
+                false
+        );
+        distanceRow.addView(routeDistanceInput, weighted());
+
+        routeRoundTripInput = new CheckBox(this);
+        routeRoundTripInput.setText("Туда и обратно");
+        routeRoundTripInput.setTextColor(Color.parseColor("#F4F7FA"));
+        routeRoundTripInput.setChecked(routePrefs.getBoolean("round_trip", false));
+        routeRoundTripInput.setOnCheckedChangeListener((button, checked) ->
+                refreshRouteEstimate(false));
+        distanceRow.addView(routeRoundTripInput, weighted());
+
+        field(settingsCard, "Стиль поездки", 13, true);
+        LinearLayout profiles = new LinearLayout(this);
+        profiles.setOrientation(LinearLayout.HORIZONTAL);
+        settingsCard.addView(profiles, fullWidth());
+
+        routeEcoButton = new Button(this);
+        routeEcoButton.setText("ЭКО");
+        routeBalancedButton = new Button(this);
+        routeBalancedButton.setText("БАЛАНС");
+        routeFastButton = new Button(this);
+        routeFastButton.setText("БЫСТРО");
+        profiles.addView(routeEcoButton, weighted());
+        profiles.addView(routeBalancedButton, weighted());
+        profiles.addView(routeFastButton, weighted());
+
+        routeEcoButton.setOnClickListener(v -> selectRouteProfile(RouteEnergyEstimator.PROFILE_ECO));
+        routeBalancedButton.setOnClickListener(v ->
+                selectRouteProfile(RouteEnergyEstimator.PROFILE_BALANCED));
+        routeFastButton.setOnClickListener(v ->
+                selectRouteProfile(RouteEnergyEstimator.PROFILE_FAST));
+        refreshRouteProfileButtons();
+
+        field(settingsCard, "Водитель + груз, кг   /   подъём по пути, м", 12, false)
+                .setTextColor(Color.parseColor("#8FA6B5"));
+
+        LinearLayout conditions = new LinearLayout(this);
+        conditions.setOrientation(LinearLayout.HORIZONTAL);
+        settingsCard.addView(conditions, fullWidth());
+
+        routeLoadInput = decimalInput(
+                "Водитель + груз, кг",
+                routePrefs.getFloat("load_kg", 80f),
+                false
+        );
+        routeClimbInput = decimalInput(
+                "Подъём по пути, м",
+                routePrefs.getFloat("climb_m", 0f),
+                false
+        );
+        conditions.addView(routeLoadInput, weighted());
+        conditions.addView(routeClimbInput, weighted());
+
+        Button calculate = new Button(this);
+        calculate.setText("РАССЧИТАТЬ ОСТАТОК");
+        stylePrimaryButton(calculate);
+        calculate.setOnClickListener(v -> refreshRouteEstimate(true));
+        settingsCard.addView(calculate, fullWidth());
+
+        LinearLayout resultCard = card(box);
+        routeResultText = field(resultCard, "ВЫБЕРИТЕ МАРШРУТ", 23, true);
+        routeResultText.setGravity(Gravity.CENTER_HORIZONTAL);
+        routeDetailsText = field(
+                resultCard,
+                "После подключения G10 здесь появится прогноз остатка батареи.",
+                15,
+                false
+        );
+        routeDetailsText.setGravity(Gravity.CENTER_HORIZONTAL);
+
+        Button navigator = new Button(this);
+        navigator.setText("ОТКРЫТЬ В НАВИГАТОРЕ");
+        navigator.setOnClickListener(v -> openRouteInNavigator());
+        resultCard.addView(navigator, fullWidth());
+
+        routeAssumptionsText = field(
+                box,
+                "Пока ток BMS не расшифрован, результат показывается диапазоном. " +
+                        "Он станет точнее после 3–5 обычных поездок.",
                 12,
                 false
         );
-        safety.setPadding(0, dp(8), 0, dp(8));
+        routeAssumptionsText.setTextColor(Color.parseColor("#8FA6B5"));
 
+        refreshRouteEstimate(false);
         return wrap(box);
     }
 
@@ -302,8 +528,8 @@ public class MainActivity extends Activity
 
         TextView note = field(
                 box,
-                "Alpha: здесь рисуется реальная геометрия GPS-трека без интернет-карт. " +
-                        "Подложку карты и маршрутизацию добавим следующим этапом.",
+                "Здесь остаётся технический GPS-трек поездки. Выбор точки назначения и варианты пути " +
+                        "теперь находятся на вкладке МАРШРУТ.",
                 12,
                 false
         );
@@ -407,7 +633,7 @@ public class MainActivity extends Activity
 
         TextView profileNote = field(
                 box,
-                "Если точная ёмкость с наклейки неизвестна — оставьте 0. " +
+                "Для G10 установлен заводской профиль 48 В / 15,6 А·ч. " +
                         "Температуру меняйте перед поездкой. Копию JSON можно сохранить в Google Drive " +
                         "через системное окно файлов.",
                 12,
@@ -435,7 +661,7 @@ public class MainActivity extends Activity
         TextView lastTest = field(
                 box,
                 "Последний тест 12.08.2026: после F0 4D 13 в 32 следующих кадрах FFF2 " +
-                        "отдельного ответа не найдено. Команда не считается подтверждённой и в v0.5 не отправляется.",
+                        "отдельного ответа не найдено. Команда не считается подтверждённой и не отправляется.",
                 12,
                 true
         );
@@ -491,18 +717,279 @@ public class MainActivity extends Activity
         return wrap(box);
     }
 
+    private final class RouteMapBridge {
+        @JavascriptInterface
+        public void onMapReady() {
+            runOnUiThread(() -> {
+                routeMapReady = true;
+                pushLocationToRouteMap();
+            });
+        }
+
+        @JavascriptInterface
+        public void onRouteReady(
+                double distanceKm,
+                double destinationLat,
+                double destinationLon,
+                String label
+        ) {
+            runOnUiThread(() -> {
+                if (distanceKm <= 0 || distanceKm > 500) return;
+                routeDestinationLatitude = destinationLat;
+                routeDestinationLongitude = destinationLon;
+                routeDestinationLabel = label == null || label.trim().isEmpty()
+                        ? "Точка на карте"
+                        : label.trim();
+                String shortLabel = routeDestinationLabel.length() > 90
+                        ? routeDestinationLabel.substring(0, 87) + "…"
+                        : routeDestinationLabel;
+                routeDestinationText.setText("Куда: " + shortLabel);
+                routeDistanceInput.setText(String.format(Locale.US, "%.2f", distanceKm));
+                refreshRouteEstimate(false);
+            });
+        }
+
+        @JavascriptInterface
+        public void onRouteError(String message) {
+            runOnUiThread(() -> {
+                if (routeDestinationText != null && message != null) {
+                    routeDestinationText.setText("Карта: " + message);
+                }
+            });
+        }
+    }
+
+    private void pushLocationToRouteMap() {
+        if (!routeMapReady || routeWebView == null ||
+                !Double.isFinite(latestLatitude) || !Double.isFinite(latestLongitude)) {
+            return;
+        }
+        routeWebView.evaluateJavascript(
+                String.format(
+                        Locale.US,
+                        "window.g10SetStart && window.g10SetStart(%.7f, %.7f);",
+                        latestLatitude,
+                        latestLongitude
+                ),
+                null
+        );
+    }
+
+    private void selectRouteProfile(String profile) {
+        selectedRouteProfile = RouteEnergyEstimator.normalizeProfile(profile);
+        refreshRouteProfileButtons();
+        refreshRouteEstimate(false);
+    }
+
+    private void refreshRouteProfileButtons() {
+        if (routeEcoButton == null) return;
+        styleChoiceButton(
+                routeEcoButton,
+                RouteEnergyEstimator.PROFILE_ECO.equals(selectedRouteProfile)
+        );
+        styleChoiceButton(
+                routeBalancedButton,
+                RouteEnergyEstimator.PROFILE_BALANCED.equals(selectedRouteProfile)
+        );
+        styleChoiceButton(
+                routeFastButton,
+                RouteEnergyEstimator.PROFILE_FAST.equals(selectedRouteProfile)
+        );
+    }
+
+    private void refreshRouteEstimate(boolean showErrors) {
+        if (routeDistanceInput == null) return;
+
+        double distance = numberOr(routeDistanceInput, 0);
+        double loadKg = numberOr(routeLoadInput, 80);
+        double climbM = numberOr(routeClimbInput, 0);
+        boolean roundTrip = routeRoundTripInput != null && routeRoundTripInput.isChecked();
+
+        if (distance < 0 || distance > 500 || loadKg < 20 || loadKg > 200 ||
+                climbM < 0 || climbM > 10_000) {
+            if (showErrors) {
+                Toast.makeText(this, "Проверьте расстояние, вес и набор высоты", Toast.LENGTH_LONG)
+                        .show();
+            }
+            return;
+        }
+
+        double profileRate = learnedRateForRouteProfile(selectedRouteProfile);
+        lastRouteResult = RouteEnergyEstimator.estimate(
+                new RouteEnergyEstimator.Input(
+                        distance,
+                        roundTrip,
+                        selectedRouteProfile,
+                        batteryCoach.getCurrentVoltage(),
+                        batteryCoach.getFullVoltage(),
+                        batteryCoach.getReserveVoltage(),
+                        batteryCoach.getTemperatureC(),
+                        loadKg,
+                        climbM,
+                        batteryCoach.getKmPerVolt(),
+                        profileRate,
+                        batteryCoach.getLearningTripCount()
+                )
+        );
+
+        boolean routeSettingsChanged =
+                Math.abs(routePrefs.getFloat("distance_km", -1f) - distance) > 0.001 ||
+                Math.abs(routePrefs.getFloat("load_kg", -1f) - loadKg) > 0.001 ||
+                Math.abs(routePrefs.getFloat("climb_m", -1f) - climbM) > 0.001 ||
+                routePrefs.getBoolean("round_trip", !roundTrip) != roundTrip ||
+                !selectedRouteProfile.equals(routePrefs.getString("profile", ""));
+        if (routeSettingsChanged) {
+            routePrefs.edit()
+                    .putFloat("distance_km", (float) distance)
+                    .putFloat("load_kg", (float) loadKg)
+                    .putFloat("climb_m", (float) climbM)
+                    .putBoolean("round_trip", roundTrip)
+                    .putString("profile", selectedRouteProfile)
+                    .apply();
+        }
+
+        if (distance <= 0) {
+            routeResultText.setText("ВЫБЕРИТЕ МАРШРУТ");
+            routeResultText.setTextColor(Color.parseColor("#8FA6B5"));
+            routeDetailsText.setText("Нажмите точку на карте, найдите адрес или введите километраж вручную.");
+            dashboardRouteText.setText("Маршрут ещё не выбран");
+            if (showErrors) {
+                Toast.makeText(this, "Сначала выберите маршрут", Toast.LENGTH_SHORT).show();
+            }
+            return;
+        }
+
+        if (lastRouteResult.status == RouteEnergyEstimator.Status.NO_DATA) {
+            boolean hasVoltage = batteryCoach.getCurrentVoltage() > 0;
+            routeResultText.setText(hasVoltage ? "БАТАРЕЯ В РЕЗЕРВЕ" : "ПОДКЛЮЧИТЕ G10");
+            routeResultText.setTextColor(Color.parseColor(
+                    hasVoltage ? "#FF6B6B" : "#FFB020"
+            ));
+            routeDetailsText.setText(hasVoltage
+                    ? "Текущее напряжение уже у резервного порога. Перед поездкой нужна зарядка."
+                    : String.format(
+                            Locale.US,
+                            "Маршрут %.1f км выбран. Для расчёта нужен текущий вольтаж батареи.",
+                            lastRouteResult.totalDistanceKm
+                    ));
+            dashboardRouteText.setText(hasVoltage
+                    ? "Перед маршрутом нужна зарядка"
+                    : String.format(
+                            Locale.US,
+                            "%.1f км • подключите G10 для прогноза",
+                            lastRouteResult.totalDistanceKm
+                    ));
+        } else {
+            routeResultText.setText(lastRouteResult.headlineRussian());
+            routeResultText.setTextColor(routeStatusColor(lastRouteResult.status));
+            routeDetailsText.setText(lastRouteResult.detailsRussian());
+            dashboardRouteText.setText(String.format(
+                    Locale.US,
+                    "%.1f км • по прибытии ~%.0f%% • %s",
+                    lastRouteResult.totalDistanceKm,
+                    lastRouteResult.arrivalSocExpectedPercent,
+                    lastRouteResult.headlineRussian().toLowerCase(Locale.ROOT)
+            ));
+        }
+
+        routeAssumptionsText.setText(String.format(
+                Locale.US,
+                "%s • %.0f°C • водитель и груз %.0f кг • подъём %.0f м • %s",
+                routeProfileRussian(selectedRouteProfile),
+                batteryCoach.getTemperatureC(),
+                loadKg,
+                climbM,
+                lastRouteResult.personalized
+                        ? "персональная модель"
+                        : "пока заводская модель, диапазон расширен"
+        ));
+    }
+
+    private double learnedRateForRouteProfile(String profile) {
+        if (RouteEnergyEstimator.PROFILE_ECO.equals(profile)) {
+            return batteryCoach.getModeKmPerVolt("ECO");
+        }
+        if (RouteEnergyEstimator.PROFILE_FAST.equals(profile)) {
+            double race = batteryCoach.getModeKmPerVolt("RACE");
+            return race > 0 ? race : batteryCoach.getModeKmPerVolt("SPORT");
+        }
+        return 0;
+    }
+
+    private String routeProfileRussian(String profile) {
+        if (RouteEnergyEstimator.PROFILE_ECO.equals(profile)) return "Экономичный режим";
+        if (RouteEnergyEstimator.PROFILE_FAST.equals(profile)) return "Быстрый режим";
+        return "Сбалансированный режим";
+    }
+
+    private int routeStatusColor(RouteEnergyEstimator.Status status) {
+        if (status == RouteEnergyEstimator.Status.SAFE) {
+            return Color.parseColor("#58D68D");
+        }
+        if (status == RouteEnergyEstimator.Status.TIGHT) {
+            return Color.parseColor("#FFB020");
+        }
+        if (status == RouteEnergyEstimator.Status.INSUFFICIENT) {
+            return Color.parseColor("#FF6B6B");
+        }
+        return Color.parseColor("#8FA6B5");
+    }
+
+    private double numberOr(EditText input, double fallback) {
+        if (input == null) return fallback;
+        try {
+            String raw = input.getText().toString().trim().replace(',', '.');
+            return raw.isEmpty() ? fallback : Double.parseDouble(raw);
+        } catch (NumberFormatException ignored) {
+            return fallback;
+        }
+    }
+
+    private void openRouteInNavigator() {
+        if (!Double.isFinite(routeDestinationLatitude) ||
+                !Double.isFinite(routeDestinationLongitude)) {
+            Toast.makeText(this, "Сначала выберите точку назначения на карте", Toast.LENGTH_SHORT)
+                    .show();
+            return;
+        }
+
+        String query = String.format(
+                Locale.US,
+                "%.7f,%.7f (%s)",
+                routeDestinationLatitude,
+                routeDestinationLongitude,
+                routeDestinationLabel
+        );
+        Intent intent = new Intent(
+                Intent.ACTION_VIEW,
+                Uri.parse("geo:0,0?q=" + Uri.encode(query))
+        );
+        try {
+            startActivity(intent);
+        } catch (Exception e) {
+            Toast.makeText(this, "На телефоне не найдено приложение навигации", Toast.LENGTH_LONG)
+                    .show();
+        }
+    }
+
     private Button tabButton(String text) {
         Button b = new Button(this);
         b.setText(text);
-        b.setTextSize(10);
+        b.setTextSize(11);
         b.setMinWidth(0);
         b.setMinimumWidth(0);
+        b.setTextColor(Color.parseColor("#AFC0CC"));
+        b.setBackground(roundedBackground("#16222D", 10));
+        LinearLayout.LayoutParams p = weighted();
+        p.setMargins(dp(2), dp(2), dp(2), dp(2));
+        b.setLayoutParams(p);
         return b;
     }
 
     private Button modeButton(String text, int mode) {
         Button b = new Button(this);
         b.setText(text);
+        styleChoiceButton(b, false);
         b.setOnClickListener(v -> {
             boolean ok = ble.sendMode(mode);
             if (!ok) {
@@ -527,6 +1014,49 @@ public class MainActivity extends Activity
         row.addView(b, weighted());
     }
 
+    private void registerNavigation(Button button, View tab, boolean needsLocation) {
+        navigationButtons.add(button);
+        button.setTag(tab);
+        button.setOnClickListener(v -> {
+            if (needsLocation) ensureLocationPermission();
+            showTab(tab);
+        });
+    }
+
+    private LinearLayout card(LinearLayout root) {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(12), dp(10), dp(12), dp(10));
+        card.setBackground(roundedBackground("#131E28", 14));
+
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        );
+        p.setMargins(0, dp(5), 0, dp(5));
+        root.addView(card, p);
+        return card;
+    }
+
+    private GradientDrawable roundedBackground(String color, int radiusDp) {
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setColor(Color.parseColor(color));
+        drawable.setCornerRadius(dp(radiusDp));
+        return drawable;
+    }
+
+    private void stylePrimaryButton(Button button) {
+        button.setTextColor(Color.parseColor("#07130D"));
+        button.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        button.setBackground(roundedBackground("#58D68D", 11));
+    }
+
+    private void styleChoiceButton(Button button, boolean selected) {
+        button.setTextColor(Color.parseColor(selected ? "#07130D" : "#DCE7EF"));
+        button.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        button.setBackground(roundedBackground(selected ? "#58D68D" : "#263746", 9));
+    }
+
     private LinearLayout verticalBox() {
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
@@ -544,6 +1074,7 @@ public class MainActivity extends Activity
         TextView t = new TextView(this);
         t.setText(text);
         t.setTextSize(size);
+        t.setTextColor(Color.parseColor("#F4F7FA"));
         if (bold) t.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         t.setPadding(0, dp(3), 0, dp(3));
         root.addView(t, fullWidth());
@@ -558,6 +1089,11 @@ public class MainActivity extends Activity
         int type = InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL;
         if (signed) type |= InputType.TYPE_NUMBER_FLAG_SIGNED;
         input.setInputType(type);
+        input.setTextColor(Color.parseColor("#F4F7FA"));
+        input.setHintTextColor(Color.parseColor("#7F95A5"));
+        input.setBackgroundTintList(android.content.res.ColorStateList.valueOf(
+                Color.parseColor("#58D68D")
+        ));
         input.setPadding(dp(6), dp(2), dp(6), dp(2));
         return input;
     }
@@ -587,6 +1123,7 @@ public class MainActivity extends Activity
             }
 
             trips.setReserveVoltage(reserve);
+            loadProfileInputs();
             refreshBatteryAi();
             Toast.makeText(this, "Профиль батареи сохранён", Toast.LENGTH_SHORT).show();
         } catch (NumberFormatException e) {
@@ -608,6 +1145,31 @@ public class MainActivity extends Activity
         aiCyclesInput.setText(String.valueOf(batteryCoach.getCycleCount()));
     }
 
+    private void loadRouteInputs() {
+        if (routeDistanceInput == null) return;
+        routeDistanceInput.setText(String.format(
+                Locale.US,
+                "%.2f",
+                routePrefs.getFloat("distance_km", 0f)
+        ));
+        routeLoadInput.setText(String.format(
+                Locale.US,
+                "%.0f",
+                routePrefs.getFloat("load_kg", 80f)
+        ));
+        routeClimbInput.setText(String.format(
+                Locale.US,
+                "%.0f",
+                routePrefs.getFloat("climb_m", 0f)
+        ));
+        routeRoundTripInput.setChecked(routePrefs.getBoolean("round_trip", false));
+        selectedRouteProfile = RouteEnergyEstimator.normalizeProfile(
+                routePrefs.getString("profile", RouteEnergyEstimator.PROFILE_BALANCED)
+        );
+        refreshRouteProfileButtons();
+        refreshRouteEstimate(false);
+    }
+
     private LinearLayout.LayoutParams fullWidth() {
         return new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
@@ -625,10 +1187,19 @@ public class MainActivity extends Activity
 
     private void showTab(View selected) {
         dashboardTab.setVisibility(selected == dashboardTab ? View.VISIBLE : View.GONE);
+        routeTab.setVisibility(selected == routeTab ? View.VISIBLE : View.GONE);
         tripTab.setVisibility(selected == tripTab ? View.VISIBLE : View.GONE);
         mapTab.setVisibility(selected == mapTab ? View.VISIBLE : View.GONE);
         batteryTab.setVisibility(selected == batteryTab ? View.VISIBLE : View.GONE);
         labTab.setVisibility(selected == labTab ? View.VISIBLE : View.GONE);
+
+        for (Button button : navigationButtons) {
+            boolean active = button.getTag() == selected;
+            button.setTextColor(Color.parseColor(active ? "#07130D" : "#AFC0CC"));
+            button.setBackground(roundedBackground(active ? "#58D68D" : "#16222D", 10));
+        }
+
+        if (selected == routeTab) pushLocationToRouteMap();
     }
 
     private void ensureBleAndScan() {
@@ -692,7 +1263,11 @@ public class MainActivity extends Activity
 
     @Override
     public void onBleStatus(String status) {
-        runOnUiThread(() -> connectionText.setText("BLE: " + status));
+        runOnUiThread(() -> {
+            boolean ready = status != null && status.contains("Notify активно");
+            connectionText.setText((ready ? "● " : "○ ") + status);
+            connectionText.setTextColor(Color.parseColor(ready ? "#58D68D" : "#FFB020"));
+        });
     }
 
     @Override
@@ -707,9 +1282,9 @@ public class MainActivity extends Activity
     public void onTelemetry(G10BleManager.Telemetry t) {
         runOnUiThread(() -> {
             speedText.setText(String.valueOf(t.speedKmh));
-            batteryText.setText(String.format(Locale.US, "Батарея: %.2f В", t.batteryVoltage));
+            batteryText.setText(String.format(Locale.US, "%.2f В", t.batteryVoltage));
             modeText.setText("Режим: " + t.modeLabel);
-            cruiseText.setText("Круиз активен: " + (t.cruiseActive ? "ДА" : "НЕТ"));
+            cruiseText.setText("Круиз: " + (t.cruiseActive ? "АКТИВЕН" : "нет"));
             brakeText.setText("Тормоз: " + (t.brake ? "ДА" : "НЕТ"));
         });
 
@@ -744,11 +1319,14 @@ public class MainActivity extends Activity
     @Override
     public void onLocationChanged(TripTracker.TripPoint point) {
         runOnUiThread(() -> {
+            latestLatitude = point.latitude;
+            latestLongitude = point.longitude;
             locationText.setText(String.format(
                     Locale.US,
                     "GPS: %.6f, %.6f   ±%.0f м   alt %.1f м",
                     point.latitude, point.longitude, point.accuracy, point.altitude));
             trackView.setPoints(trips.getPointsSnapshot());
+            pushLocationToRouteMap();
             refreshTripUi();
         });
     }
@@ -845,6 +1423,11 @@ public class MainActivity extends Activity
         aiSocText.setText(soc >= 0
                 ? String.format(Locale.US, "SOC: ~%.0f%% (оценка по напряжению)", soc)
                 : "SOC: —");
+        if (dashboardSocText != null) {
+            dashboardSocText.setText(soc >= 0
+                    ? String.format(Locale.US, "БАТАРЕЯ ~%.0f%%", soc)
+                    : "БАТАРЕЯ —");
+        }
 
         double sag = batteryCoach.getCurrentSag();
         aiSagText.setText(sag >= 0
@@ -888,6 +1471,16 @@ public class MainActivity extends Activity
         } else {
             aiRangeText.setText("Прогноз запаса: обучается");
         }
+        if (dashboardRangeText != null) {
+            dashboardRangeText.setText(range >= 0
+                    ? String.format(
+                            Locale.US,
+                            "Ожидаемый запас ~%.1f км • уверенность %d%%",
+                            range,
+                            batteryCoach.getConfidencePercent()
+                    )
+                    : "Запас хода появится после подключения");
+        }
 
         double health = batteryCoach.getHealthTrendPercent();
         aiHealthText.setText(health >= 0
@@ -924,6 +1517,8 @@ public class MainActivity extends Activity
                         ? String.format(Locale.US, " • номинально ~%.0f Вт·ч", energyWh)
                         : ""
         ));
+
+        refreshRouteEstimate(false);
     }
 
     private void exportLab() {
@@ -1012,6 +1607,7 @@ public class MainActivity extends Activity
                 AppDataBackup.importJson(this, readText(data.getData()));
                 trips.setReserveVoltage(batteryCoach.getReserveVoltage());
                 loadProfileInputs();
+                loadRouteInputs();
                 refreshHistory();
                 refreshBatteryAi();
                 Toast.makeText(this, "Резервная копия восстановлена", Toast.LENGTH_LONG).show();
@@ -1092,6 +1688,10 @@ public class MainActivity extends Activity
     protected void onDestroy() {
         trips.stopMonitoring();
         ble.close();
+        if (routeWebView != null) {
+            routeWebView.removeJavascriptInterface("G10Route");
+            routeWebView.destroy();
+        }
         super.onDestroy();
     }
 }

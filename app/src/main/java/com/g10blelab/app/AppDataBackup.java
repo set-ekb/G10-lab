@@ -28,6 +28,9 @@ public final class AppDataBackup {
         root.put("trips", preferencesToJson(
                 context.getSharedPreferences("g10_trips", Context.MODE_PRIVATE)
         ));
+        root.put("route_planner", preferencesToJson(
+                context.getSharedPreferences("g10_route_planner", Context.MODE_PRIVATE)
+        ));
         return root.toString(2);
     }
 
@@ -54,6 +57,13 @@ public final class AppDataBackup {
                 context.getSharedPreferences("g10_trips", Context.MODE_PRIVATE),
                 trips
         );
+        JSONObject routePlanner = root.optJSONObject("route_planner");
+        if (routePlanner != null) {
+            restorePreferences(
+                    context.getSharedPreferences("g10_route_planner", Context.MODE_PRIVATE),
+                    routePlanner
+            );
+        }
     }
 
     private static JSONObject preferencesToJson(SharedPreferences preferences)

@@ -14,6 +14,7 @@ public class BatteryCoach {
     private static final double DEFAULT_FULL_VOLTAGE = 54.6;
     private static final double DEFAULT_RESERVE_VOLTAGE = 44.0;
     private static final double DEFAULT_TEMPERATURE_C = 20.0;
+    private static final double DEFAULT_CAPACITY_AH = 15.6;
 
     private final SharedPreferences prefs;
 
@@ -130,7 +131,10 @@ public class BatteryCoach {
         prefs.edit()
                 .putFloat("profile_full_v", (float) fullVoltage)
                 .putFloat("profile_reserve_v", (float) reserveVoltage)
-                .putFloat("profile_capacity_ah", (float) capacityAh)
+                .putFloat(
+                        "profile_capacity_ah",
+                        (float) (capacityAh > 0 ? capacityAh : DEFAULT_CAPACITY_AH)
+                )
                 .putFloat("profile_temperature_c", (float) temperatureC)
                 .putInt("profile_cycles", cycleCount)
                 .apply();
@@ -163,22 +167,43 @@ public class BatteryCoach {
         if (rate <= 0) rate = getKmPerVolt();
 
         double reserve = getReserveVoltage();
-        if (rate <= 0 || currentVoltage <= reserve) return -1;
+        if (currentVoltage <= reserve) return -1;
+
+        if (rate <= 0) {
+            String profile = "ECO".equals(currentMode)
+                    ? RouteEnergyEstimator.PROFILE_ECO
+                    : "RACE".equals(currentMode)
+                            ? RouteEnergyEstimator.PROFILE_FAST
+                            : RouteEnergyEstimator.PROFILE_BALANCED;
+            RouteEnergyEstimator.Result fallback = RouteEnergyEstimator.estimate(
+                    new RouteEnergyEstimator.Input(
+                            1.0,
+                            false,
+                            profile,
+                            currentVoltage,
+                            getFullVoltage(),
+                            reserve,
+                            getTemperatureC(),
+                            75.0,
+                            0,
+                            0,
+                            0,
+                            0
+                    )
+            );
+            return fallback.expectedRangeKm > 0 ? fallback.expectedRangeKm : -1;
+        }
 
         double usableVoltage = currentVoltage - reserve;
         return Math.max(0, usableVoltage * rate * temperatureFactor(getTemperatureC()));
     }
 
     public double getSocEstimatePercent() {
-        double full = getFullVoltage();
-        double reserve = getReserveVoltage();
-        if (currentVoltage <= 0 || full <= reserve) return -1;
-
-        double linear = clamp((currentVoltage - reserve) / (full - reserve), 0, 1);
-        // A mild S-curve is closer to a resting Li-ion pack than a straight line,
-        // but the value remains an estimate until the real BMS SOC is decoded.
-        double curved = linear * linear * (3.0 - 2.0 * linear);
-        return curved * 100.0;
+        return RouteEnergyEstimator.estimateSocPercent(
+                currentVoltage,
+                getFullVoltage(),
+                getReserveVoltage()
+        );
     }
 
     public double getHealthTrendPercent() {
@@ -191,7 +216,7 @@ public class BatteryCoach {
 
     public int getConfidencePercent() {
         int trips = getLearningTripCount();
-        if (trips <= 0) return 0;
+        if (trips <= 0) return currentVoltage > 0 ? 20 : 0;
         double quality = prefs.getFloat("last_quality", 50f);
         double confidence = Math.min(85, trips * 12.0) * clamp(quality / 80.0, 0.55, 1.0);
         if (getModeKmPerVolt(currentMode) > 0) confidence += 10;
@@ -247,7 +272,8 @@ public class BatteryCoach {
     }
 
     public double getCapacityAh() {
-        return prefs.getFloat("profile_capacity_ah", 0f);
+        double stored = prefs.getFloat("profile_capacity_ah", (float) DEFAULT_CAPACITY_AH);
+        return stored > 0 ? stored : DEFAULT_CAPACITY_AH;
     }
 
     public double getTemperatureC() {

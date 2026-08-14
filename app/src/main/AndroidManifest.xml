@@ -9,6 +9,9 @@
         android:name="android.hardware.location.gps"
         android:required="false" />
 
+    <!-- Online map, address search and bicycle route calculation. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <!-- Legacy Bluetooth -->
     <uses-permission
         android:name="android.permission.BLUETOOTH"
@@ -30,6 +33,7 @@
     <application
         android:allowBackup="true"
         android:label="G10 Companion"
+        android:usesCleartextTraffic="false"
         android:supportsRtl="true"
         android:theme="@style/AppTheme">
 
