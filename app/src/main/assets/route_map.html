@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+          integrity="sha256-p4NxAoJBhIINfQ3ynh0dD1xT6kYfZ5MZ7E0i2QJw1pM=" crossorigin="">
+    <style>
+        html, body, #map { height: 100%; margin: 0; background: #101820; font-family: sans-serif; }
+        #search { position: absolute; z-index: 1000; top: 8px; left: 8px; right: 8px;
+            display: flex; gap: 6px; }
+        #address { flex: 1; min-width: 0; border: 1px solid #455667; border-radius: 10px;
+            padding: 11px; color: #f6f8fa; background: rgba(14, 22, 30, .94); font-size: 15px; }
+        button { border: 0; border-radius: 10px; padding: 0 15px; font-weight: 700;
+            color: #071018; background: #58d68d; }
+        #hint { position: absolute; z-index: 1000; left: 8px; right: 8px; bottom: 28px;
+            padding: 8px 10px; border-radius: 9px; color: #e8eef4;
+            background: rgba(14, 22, 30, .90); font-size: 12px; pointer-events: none; }
+        #choices { position: absolute; z-index: 1000; left: 8px; right: 8px; bottom: 72px;
+            display: flex; gap: 6px; overflow-x: auto; }
+        #choices button { min-height: 38px; white-space: nowrap; background: #263746; color: #dce7ef; }
+        #choices button.selected { background: #ffb020; color: #14100a; }
+        .leaflet-control-attribution { font-size: 9px !important; }
+        .leaflet-container { background: #17232d; }
+    </style>
+</head>
+<body>
+<div id="map"></div>
+<form id="search">
+    <input id="address" type="search" enterkeyhint="search"
+           placeholder="Адрес или место назначения">
+    <button type="submit">НАЙТИ</button>
+</form>
+<div id="choices"></div>
+<div id="hint">Ждём GPS… Затем нажмите на карту или найдите адрес.</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script>
+(() => {
+    // Public endpoints are called only after a deliberate user action, cached
+    // where applicable, attributed in the UI and throttled to <= 1 request/s.
+    // Policies: operations.osmfoundation.org/policies/nominatim/ and
+    // fossgis.de/arbeitsgruppen/osm-server/nutzungsbedingungen/
+    const hint = document.getElementById('hint');
+    const choices = document.getElementById('choices');
+    const input = document.getElementById('address');
+    const bridge = window.G10Route;
+    let map;
+    let start = null;
+    let destination = null;
+    let startMarker = null;
+    let destinationMarker = null;
+    let routeLayers = [];
+    let routes = [];
+    let destinationLabel = 'Точка на карте';
+    let lastGeoRequest = 0;
+    let lastRouteRequest = 0;
+
+    function reportError(message) {
+        hint.textContent = message;
+        if (bridge && bridge.onRouteError) bridge.onRouteError(String(message));
+    }
+
+    if (!window.L) {
+        reportError('Карта не загрузилась. Проверьте интернет; расстояние можно ввести вручную.');
+        return;
+    }
+
+    map = L.map('map', { zoomControl: false }).setView([56.8389, 60.6057], 12);
+    L.control.zoom({ position: 'bottomright' }).addTo(map);
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19,
+        attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> · ' +
+            '<a href="https://www.openstreetmap.org/fixthemap">исправить карту</a>'
+    }).addTo(map);
+
+    function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+
+    async function throttle(kind) {
+        const now = Date.now();
+        const last = kind === 'geo' ? lastGeoRequest : lastRouteRequest;
+        const delay = Math.max(0, 1050 - (now - last));
+        if (delay) await sleep(delay);
+        if (kind === 'geo') lastGeoRequest = Date.now();
+        else lastRouteRequest = Date.now();
+    }
+
+    function setMarker(previous, latlng, color) {
+        if (previous) map.removeLayer(previous);
+        return L.circleMarker(latlng, {
+            radius: 8, weight: 3, color: '#ffffff', fillColor: color, fillOpacity: 1
+        }).addTo(map);
+    }
+
+    function clearRoutes() {
+        routeLayers.forEach(layer => map.removeLayer(layer));
+        routeLayers = [];
+        routes = [];
+        choices.innerHTML = '';
+    }
+
+    function selectRoute(index) {
+        if (!routes[index]) return;
+        routeLayers.forEach((layer, i) => layer.setStyle({
+            color: i === index ? '#ff9f1c' : '#78909c',
+            weight: i === index ? 7 : 4,
+            opacity: i === index ? .95 : .55
+        }));
+        [...choices.children].forEach((button, i) =>
+            button.classList.toggle('selected', i === index));
+
+        const km = routes[index].distance / 1000;
+        const minutes = Math.max(1, Math.round(routes[index].duration / 60));
+        hint.textContent = `Выбран маршрут ${km.toFixed(1)} км · примерно ${minutes} мин. ` +
+            'Проверьте дорожные знаки и допустимость пути для самоката.';
+        if (bridge && bridge.onRouteReady) {
+            bridge.onRouteReady(km, destination.lat, destination.lng, destinationLabel);
+        }
+    }
+
+    function drawRoutes(data) {
+        clearRoutes();
+        routes = (data.routes || []).slice(0, 3);
+        if (!routes.length) throw new Error('Маршрут не найден');
+
+        routes.forEach((route, index) => {
+            const layer = L.geoJSON(route.geometry, {
+                style: { color: '#78909c', weight: 4, opacity: .55 }
+            }).addTo(map);
+            layer.on('click', () => selectRoute(index));
+            routeLayers.push(layer);
+
+            const button = document.createElement('button');
+            const km = route.distance / 1000;
+            button.textContent = `${index + 1}: ${km.toFixed(1)} км`;
+            button.type = 'button';
+            button.onclick = () => selectRoute(index);
+            choices.appendChild(button);
+        });
+
+        const group = L.featureGroup(routeLayers.concat([startMarker, destinationMarker].filter(Boolean)));
+        map.fitBounds(group.getBounds().pad(.15), { maxZoom: 16 });
+        selectRoute(0);
+    }
+
+    async function requestRoute() {
+        if (!start || !destination) return;
+        hint.textContent = 'Строим варианты маршрута…';
+        clearRoutes();
+
+        const coords = `${start.lng},${start.lat};${destination.lng},${destination.lat}`;
+        const bikeUrl = 'https://routing.openstreetmap.de/routed-bike/route/v1/driving/' +
+            `${coords}?alternatives=true&overview=full&geometries=geojson&steps=false`;
+        const roadFallback = 'https://router.project-osrm.org/route/v1/driving/' +
+            `${coords}?alternatives=true&overview=full&geometries=geojson&steps=false`;
+
+        try {
+            await throttle('route');
+            let response = await fetch(bikeUrl);
+            if (!response.ok) throw new Error('bike router unavailable');
+            drawRoutes(await response.json());
+        } catch (bikeError) {
+            try {
+                await throttle('route');
+                const response = await fetch(roadFallback);
+                if (!response.ok) throw new Error('road router unavailable');
+                drawRoutes(await response.json());
+                hint.textContent += ' Использован запасной дорожный расчёт.';
+            } catch (roadError) {
+                reportError('Не удалось построить маршрут. Введите километраж вручную.');
+            }
+        }
+    }
+
+    function setDestination(lat, lng, label) {
+        destination = L.latLng(lat, lng);
+        destinationLabel = label || 'Точка на карте';
+        destinationMarker = setMarker(destinationMarker, destination, '#ff9f1c');
+        requestRoute();
+    }
+
+    map.on('click', event => setDestination(event.latlng.lat, event.latlng.lng, 'Точка на карте'));
+
+    document.getElementById('search').addEventListener('submit', async event => {
+        event.preventDefault();
+        const query = input.value.trim();
+        if (!query) return;
+        hint.textContent = 'Ищем адрес…';
+
+        const key = 'g10-geocode:' + query.toLowerCase();
+        try {
+            let item = null;
+            const cached = localStorage.getItem(key);
+            if (cached) item = JSON.parse(cached);
+            if (!item) {
+                await throttle('geo');
+                const url = 'https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1' +
+                    '&accept-language=ru&q=' + encodeURIComponent(query);
+                const response = await fetch(url);
+                if (!response.ok) throw new Error('search unavailable');
+                const found = await response.json();
+                if (!found.length) throw new Error('not found');
+                item = found[0];
+                localStorage.setItem(key, JSON.stringify(item));
+            }
+            setDestination(Number(item.lat), Number(item.lon), item.display_name || query);
+        } catch (error) {
+            reportError('Адрес не найден. Уточните запрос или нажмите точку на карте.');
+        }
+    });
+
+    window.g10SetStart = (lat, lng) => {
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+        const first = !start;
+        start = L.latLng(lat, lng);
+        startMarker = setMarker(startMarker, start, '#34c38f');
+        if (first) {
+            map.setView(start, 15);
+            hint.textContent = 'Нажмите точку назначения на карте или найдите адрес.';
+        }
+        if (destination && !routes.length) requestRoute();
+    };
+
+    if (bridge && bridge.onMapReady) bridge.onMapReady();
+})();
+</script>
+</body>
+</html>
