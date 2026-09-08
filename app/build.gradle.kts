@@ -10,8 +10,8 @@ android {
         applicationId = "com.g10blelab.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 11
-        versionName = "0.6.0-alpha"
+        versionCode = 12
+        versionName = "0.7.0-alpha"
     }
 
     signingConfigs {

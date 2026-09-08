@@ -31,7 +31,7 @@ public class BatteryCoach {
     }
 
     public void updateTelemetry(int speedKmh, double voltage, String mode) {
-        if (voltage <= 0 || voltage > 80) return;
+        if (!Double.isFinite(voltage) || voltage <= 0 || voltage > 80) return;
 
         currentVoltage = voltage;
         currentMode = TripAnalysisEngine.normalizeMode(mode);
@@ -73,8 +73,9 @@ public class BatteryCoach {
 
         double drop = result.voltageDrop;
         double sample = result.kmPerVolt;
-        if (result.distanceKm < 0.20 || drop < 0.15 || drop > 8.0 ||
-                sample < 0.2 || sample > 80.0 || result.gpsQualityPercent < 45) {
+        if (!Double.isFinite(result.distanceKm) || !Double.isFinite(drop) || !Double.isFinite(sample) ||
+                !Double.isFinite(result.gpsQualityPercent) || result.distanceKm < 1.0 || result.movingSeconds < 180 ||
+                drop < 0.3 || drop > 8.0 || sample < 0.2 || sample > 80.0 || result.gpsQualityPercent < 70) {
             return;
         }
 
@@ -120,7 +121,8 @@ public class BatteryCoach {
             double temperatureC,
             int cycleCount
     ) {
-        if (fullVoltage < 40 || fullVoltage > 90 ||
+        if (!Double.isFinite(fullVoltage) || !Double.isFinite(reserveVoltage) ||
+                !Double.isFinite(capacityAh) || !Double.isFinite(temperatureC) || fullVoltage < 40 || fullVoltage > 90 ||
                 reserveVoltage < 30 || reserveVoltage >= fullVoltage - 3 ||
                 capacityAh < 0 || capacityAh > 100 ||
                 temperatureC < -40 || temperatureC > 70 ||
@@ -163,39 +165,11 @@ public class BatteryCoach {
     }
 
     public double getForecastRangeKm() {
-        double rate = getModeKmPerVolt(currentMode);
-        if (rate <= 0) rate = getKmPerVolt();
-
-        double reserve = getReserveVoltage();
-        if (currentVoltage <= reserve) return -1;
-
-        if (rate <= 0) {
-            String profile = "ECO".equals(currentMode)
-                    ? RouteEnergyEstimator.PROFILE_ECO
-                    : "RACE".equals(currentMode)
-                            ? RouteEnergyEstimator.PROFILE_FAST
-                            : RouteEnergyEstimator.PROFILE_BALANCED;
-            RouteEnergyEstimator.Result fallback = RouteEnergyEstimator.estimate(
-                    new RouteEnergyEstimator.Input(
-                            1.0,
-                            false,
-                            profile,
-                            currentVoltage,
-                            getFullVoltage(),
-                            reserve,
-                            getTemperatureC(),
-                            75.0,
-                            0,
-                            0,
-                            0,
-                            0
-                    )
-            );
-            return fallback.expectedRangeKm > 0 ? fallback.expectedRangeKm : -1;
-        }
-
-        double usableVoltage = currentVoltage - reserve;
-        return Math.max(0, usableVoltage * rate * temperatureFactor(getTemperatureC()));
+        RouteEnergyEstimator.Result result = RouteEnergyEstimator.estimate(new RouteEnergyEstimator.Input(
+                0, false, RouteEnergyEstimator.PROFILE_BALANCED, currentVoltage,
+                getFullVoltage(), getReserveVoltage(), getTemperatureC(), 75, 0,
+                getKmPerVolt(), 0, getLearningTripCount()));
+        return result.hasBatteryData() ? result.expectedRangeKm : -1;
     }
 
     public double getSocEstimatePercent() {

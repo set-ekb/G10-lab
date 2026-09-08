@@ -28,12 +28,39 @@ jobs:
         with:
           gradle-version: '8.13'
 
+      - name: Verify calculation and protocol core
+        run: bash scripts/run_core_tests.sh
+
+      - name: Verify map behavior
+        run: node scripts/check_route_map.js
+
       - name: Build debug APK
         run: gradle --no-daemon :app:assembleDebug
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: G10-Companion-v0.6.0-alpha-debug
+          name: G10-Companion-v0.7.0-alpha-debug
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
+
+      - name: Enable emulator acceleration
+        run: sudo chmod a+rw /dev/kvm
+
+      - name: Android launch and navigation smoke
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 36
+          target: google_apis
+          arch: x86_64
+          disable-animations: true
+          emulator-boot-timeout: 300
+          script: python3 scripts/android_smoke.py
+
+      - name: Upload Android screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: G10-v0.7-Android-smoke
+          path: smoke-output/
+          if-no-files-found: warn
