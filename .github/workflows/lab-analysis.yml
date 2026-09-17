@@ -1,0 +1,31 @@
+name: Verify passive LAB analysis
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'scripts/analyze_lab.py'
+      - 'scripts/test_analyze_lab.py'
+      - 'lab-samples/**'
+      - '.github/workflows/lab-analysis.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/analyze_lab.py'
+      - 'scripts/test_analyze_lab.py'
+      - 'lab-samples/**'
+      - '.github/workflows/lab-analysis.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  lab:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -B -m unittest discover -s scripts -p 'test_analyze_lab.py' -v
+      - run: python -B scripts/analyze_lab.py lab-samples/g10_ble_20260812_174109.csv
