@@ -1,0 +1,80 @@
+name: Branch housekeeping
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/branch-housekeeping.yml'
+  pull_request:
+    types: [closed]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: branch-housekeeping
+  cancel-in-progress: true
+
+jobs:
+  cleanup:
+    if: github.event_name != 'pull_request' || github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Delete merged head branches
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const keep = new Set(['main', 'master', 'work/next']);
+
+            const openPrs = await github.paginate(
+              github.rest.pulls.list,
+              { owner, repo, state: 'open', per_page: 100 }
+            );
+            const openHeads = new Set(
+              openPrs
+                .filter(pr => pr.head.repo && pr.head.repo.full_name === `${owner}/${repo}`)
+                .map(pr => pr.head.ref)
+            );
+
+            const closedPrs = await github.paginate(
+              github.rest.pulls.list,
+              { owner, repo, state: 'closed', per_page: 100 }
+            );
+            const candidates = new Set(
+              closedPrs
+                .filter(pr =>
+                  pr.merged_at &&
+                  pr.head.repo &&
+                  pr.head.repo.full_name === `${owner}/${repo}`
+                )
+                .map(pr => pr.head.ref)
+            );
+
+            if (
+              context.eventName === 'pull_request' &&
+              context.payload.pull_request.merged &&
+              context.payload.pull_request.head.repo.full_name === `${owner}/${repo}`
+            ) {
+              candidates.add(context.payload.pull_request.head.ref);
+            }
+
+            let deleted = 0;
+            for (const branch of [...candidates].sort()) {
+              if (keep.has(branch) || openHeads.has(branch)) continue;
+              try {
+                await github.rest.git.getRef({ owner, repo, ref: `heads/${branch}` });
+              } catch (error) {
+                if (error.status === 404) continue;
+                throw error;
+              }
+              await github.rest.git.deleteRef({ owner, repo, ref: `heads/${branch}` });
+              core.info(`Deleted merged branch: ${branch}`);
+              deleted++;
+            }
+
+            core.notice(`Branch cleanup complete. Deleted ${deleted} merged branch(es).`);
