@@ -26,6 +26,7 @@ public final class RouteEnergyEstimator {
         SAFE,
         TIGHT,
         INSUFFICIENT,
+        NO_ROUTE,
         NO_DATA
     }
 
@@ -33,6 +34,7 @@ public final class RouteEnergyEstimator {
         public final double oneWayDistanceKm;
         public final boolean roundTrip;
         public final String profile;
+
         public final double currentVoltage;
         public final double fullVoltage;
         public final double reserveVoltage;
@@ -88,6 +90,24 @@ public final class RouteEnergyEstimator {
         public final boolean personalized;
         public final String profile;
 
+        public boolean hasBatteryData() { return currentSocPercent >= 0; }
+
+        public double arrivalRangeKm() {
+            return Math.max(0, expectedRangeKm - totalDistanceKm);
+        }
+
+        public double arrivalSafeRangeKm() {
+            return Math.max(0, safeRangeKm - totalDistanceKm);
+        }
+
+        public double arrivalOptimisticRangeKm() {
+            return Math.max(0, optimisticRangeKm - totalDistanceKm);
+        }
+
+        public double shortfallKm() {
+            return Math.max(0, totalDistanceKm - expectedRangeKm);
+        }
+
         private Result(
                 Status status,
                 double totalDistanceKm,
@@ -127,7 +147,9 @@ public final class RouteEnergyEstimator {
                 case TIGHT:
                     return "НА ГРАНИЦЕ ЗАПАСА";
                 case INSUFFICIENT:
-                    return "ЗАРЯДА НЕ ХВАТИТ";
+                    return "ПО ПРОГНОЗУ НЕ ХВАТИТ";
+                case NO_ROUTE:
+                    return "ВЫБЕРИТЕ МАРШРУТ";
                 default:
                     return "НУЖНЫ ДАННЫЕ БАТАРЕИ";
             }
@@ -138,40 +160,26 @@ public final class RouteEnergyEstimator {
                 return "Подключите G10 и дождитесь напряжения батареи.";
             }
 
-            String arrival = arrivalSocHighPercent - arrivalSocLowPercent >= 2
-                    ? String.format(
-                            Locale.US,
-                            "по прибытии ~%.0f%% (диапазон %.0f–%.0f%%)",
-                            arrivalSocExpectedPercent,
-                            arrivalSocLowPercent,
-                            arrivalSocHighPercent
-                    )
-                    : String.format(
-                            Locale.US,
-                            "по прибытии ~%.0f%%",
-                            arrivalSocExpectedPercent
-                    );
+            String arrival = shortfallKm() > 0
+                    ? String.format(Locale.US, "не хватает примерно %.1f км", shortfallKm())
+                    : String.format(Locale.US, "после маршрута ~%.1f км (%.1f–%.1f км)",
+                            arrivalRangeKm(), arrivalSafeRangeKm(), arrivalOptimisticRangeKm());
 
             String basis = personalized
                     ? "по вашим поездкам"
                     : "предварительно по заводским данным";
 
             String extra = status == Status.INSUFFICIENT
-                    ? String.format(
-                            Locale.US,
-                            " Нужен старт минимум с ~%.0f%% либо более экономичный маршрут.",
-                            minimumStartSocPercent
-                    )
+                    ? " Сократите путь или зарядите батарею."
                     : "";
 
             return String.format(
                     Locale.US,
-                    "Маршрут %.1f км • %s • безопасный запас %.1f км • %s • уверенность %d%%.%s",
+                    "Маршрут %.1f км • %s • с запасом сейчас %.1f км • %s. Оценка по напряжению.%s",
                     totalDistanceKm,
                     arrival,
                     safeRangeKm,
                     basis,
-                    confidencePercent,
                     extra
             );
         }
@@ -183,11 +191,11 @@ public final class RouteEnergyEstimator {
     public static Result estimate(Input input) {
         if (input == null) return noData(PROFILE_BALANCED);
 
-        double distance = Math.max(0, input.oneWayDistanceKm);
+        if (!validInput(input)) return noData(input.profile);
+        double distance = input.oneWayDistanceKm;
         if (input.roundTrip) distance *= 2.0;
 
-        if (input.currentVoltage <= 0 || input.fullVoltage <= input.reserveVoltage ||
-                input.currentVoltage <= input.reserveVoltage) {
+        if (input.currentVoltage <= 0 || input.fullVoltage <= input.reserveVoltage) {
             return noData(input.profile, distance);
         }
 
@@ -198,8 +206,8 @@ public final class RouteEnergyEstimator {
         );
         double socFraction = soc / 100.0;
 
-        boolean hasProfileLearning = input.learnedProfileKmPerVolt > 0;
-        boolean hasAnyLearning = hasProfileLearning || input.learnedKmPerVolt > 0;
+        boolean hasProfileLearning = input.learningTrips >= 3 && input.learnedProfileKmPerVolt > 0;
+        boolean hasAnyLearning = input.learningTrips >= 3 && (hasProfileLearning || input.learnedKmPerVolt > 0);
 
         double baseRange;
         if (hasAnyLearning) {
@@ -213,7 +221,7 @@ public final class RouteEnergyEstimator {
 
         double routeFactor = temperatureFactor(input.temperatureC)
                 * loadFactor(input.riderAndCargoKg)
-                * elevationFactor(distance, input.elevationGainM);
+                * elevationFactor(distance, input.elevationGainM * (input.roundTrip ? 2 : 1));
         double expectedRange = Math.max(0, baseRange * routeFactor);
 
         double uncertainty;
@@ -241,7 +249,7 @@ public final class RouteEnergyEstimator {
                 + Math.max(0, input.currentVoltage - input.reserveVoltage) * usableAfter;
 
         Status status;
-        if (distance <= 0) status = Status.NO_DATA;
+        if (distance <= 0) status = Status.NO_ROUTE;
         else if (distance <= safeRange) status = Status.SAFE;
         else if (distance <= expectedRange) status = Status.TIGHT;
         else status = Status.INSUFFICIENT;
@@ -283,7 +291,9 @@ public final class RouteEnergyEstimator {
             double fullVoltage,
             double reserveVoltage
     ) {
-        if (currentVoltage <= 0 || fullVoltage <= reserveVoltage) return -1;
+        if (!Double.isFinite(currentVoltage) || !Double.isFinite(fullVoltage) ||
+                !Double.isFinite(reserveVoltage) || currentVoltage <= 0 ||
+                reserveVoltage <= 0 || fullVoltage <= reserveVoltage) return -1;
         double linear = clamp(
                 (currentVoltage - reserveVoltage) / (fullVoltage - reserveVoltage),
                 0,
@@ -300,6 +310,16 @@ public final class RouteEnergyEstimator {
             return normalized;
         }
         return PROFILE_BALANCED;
+    }
+
+    private static boolean validInput(Input i) {
+        return Double.isFinite(i.oneWayDistanceKm) && i.oneWayDistanceKm >= 0 && i.oneWayDistanceKm <= 500 &&
+                Double.isFinite(i.currentVoltage) && Double.isFinite(i.fullVoltage) &&
+                Double.isFinite(i.reserveVoltage) && i.reserveVoltage > 0 &&
+                Double.isFinite(i.temperatureC) && i.temperatureC >= -40 && i.temperatureC <= 70 &&
+                Double.isFinite(i.riderAndCargoKg) && i.riderAndCargoKg >= 20 && i.riderAndCargoKg <= 200 &&
+                Double.isFinite(i.elevationGainM) && i.elevationGainM >= 0 && i.elevationGainM <= 10000 &&
+                Double.isFinite(i.learnedKmPerVolt) && Double.isFinite(i.learnedProfileKmPerVolt);
     }
 
     private static Result noData(String profile) {

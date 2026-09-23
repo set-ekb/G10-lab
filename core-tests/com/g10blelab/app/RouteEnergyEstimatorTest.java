@@ -8,6 +8,12 @@ public final class RouteEnergyEstimatorTest {
         penalizesColdHeavyClimb();
         prefersPersonalLearning();
         rejectsForecastWithoutTelemetry();
+        handlesReserveWithoutLosingTelemetry();
+        rejectsNonFiniteInputs();
+        keepsRangeWithoutDestination();
+        reportsArrivalAndShortfallInKm();
+        requiresThreeTripsForPersonalization();
+        preservesClimbDensityOnReturn();
         System.out.println("RouteEnergyEstimatorTest: OK");
     }
 
@@ -63,6 +69,50 @@ public final class RouteEnergyEstimatorTest {
                 input(5, false, "BALANCED", 0, 20, 75, 0, 0, 0, 0)
         );
         check(result.status == RouteEnergyEstimator.Status.NO_DATA, "no telemetry");
+    }
+
+    private static void handlesReserveWithoutLosingTelemetry() {
+        for (double voltage : new double[] {44.0, 43.5}) {
+            RouteEnergyEstimator.Result r = RouteEnergyEstimator.estimate(input(5, false, "ECO", voltage, 20, 75, 0, 0, 0, 0));
+            check(r.hasBatteryData() && r.expectedRangeKm == 0, "reserve is a known zero range");
+            check(r.status == RouteEnergyEstimator.Status.INSUFFICIENT, "reserve is insufficient, not no data");
+            check(r.shortfallKm() == 5 && r.arrivalRangeKm() == 0, "reserve shortfall");
+        }
+    }
+
+    private static void rejectsNonFiniteInputs() {
+        for (double invalid : new double[] {Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY}) {
+            check(!RouteEnergyEstimator.estimate(input(5, false, "ECO", invalid, 20, 75, 0, 0, 0, 0)).hasBatteryData(), "invalid voltage");
+            check(!RouteEnergyEstimator.estimate(input(invalid, false, "ECO", 50, 20, 75, 0, 0, 0, 0)).hasBatteryData(), "invalid distance");
+            check(!RouteEnergyEstimator.estimate(input(5, false, "ECO", 50, 20, invalid, 0, 0, 0, 0)).hasBatteryData(), "invalid load");
+        }
+    }
+
+    private static void keepsRangeWithoutDestination() {
+        RouteEnergyEstimator.Result r = RouteEnergyEstimator.estimate(input(0, false, "ECO", 50, 20, 75, 0, 0, 0, 0));
+        check(r.hasBatteryData() && r.status == RouteEnergyEstimator.Status.NO_ROUTE, "range available without a destination");
+        check(r.expectedRangeKm > 0, "standalone range");
+    }
+
+    private static void reportsArrivalAndShortfallInKm() {
+        RouteEnergyEstimator.Result r = RouteEnergyEstimator.estimate(input(5, false, "ECO", 50, 20, 75, 0, 0, 0, 0));
+        check(Math.abs(r.arrivalRangeKm() - (r.expectedRangeKm - 5)) < 1e-9, "arrival subtracts route length");
+        check(r.arrivalSafeRangeKm() <= r.arrivalRangeKm() && r.arrivalRangeKm() <= r.arrivalOptimisticRangeKm(), "ordered interval");
+        RouteEnergyEstimator.Result far = RouteEnergyEstimator.estimate(input(100, false, "ECO", 50, 20, 75, 0, 0, 0, 0));
+        check(far.arrivalRangeKm() == 0 && far.shortfallKm() > 0, "explicit deficit instead of negative range");
+    }
+
+    private static void requiresThreeTripsForPersonalization() {
+        RouteEnergyEstimator.Result two = RouteEnergyEstimator.estimate(input(5, false, "ECO", 50, 20, 75, 0, 80, 80, 2));
+        check(!two.personalized, "two trips cannot override factory prior");
+        check(RouteEnergyEstimator.estimate(input(5, false, "ECO", 50, 20, 75, 0, 3, 3, 3)).personalized, "three trips can personalize");
+    }
+
+    private static void preservesClimbDensityOnReturn() {
+        RouteEnergyEstimator.Result one = RouteEnergyEstimator.estimate(input(5, false, "ECO", 50, 20, 75, 100, 0, 0, 0));
+        RouteEnergyEstimator.Result round = RouteEnergyEstimator.estimate(input(5, true, "ECO", 50, 20, 75, 100, 0, 0, 0));
+        check(Math.abs(one.expectedRangeKm - round.expectedRangeKm) < 1e-9, "return does not dilute uphill penalty");
+        check(round.totalDistanceKm == 10, "doubles distance");
     }
 
     private static RouteEnergyEstimator.Input input(

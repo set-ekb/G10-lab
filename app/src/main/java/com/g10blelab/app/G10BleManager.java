@@ -16,6 +16,7 @@ import android.content.Context;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 
 import java.text.SimpleDateFormat;
 import java.util.ArrayDeque;
@@ -86,6 +87,25 @@ public class G10BleManager {
 
     private boolean scanning = false;
     private Telemetry lastTelemetry;
+    private long lastTelemetryMs = -1;
+    private long lastCommandMs = -1;
+    private boolean notifyReady;
+    private String lastProtocolFamily = "";
+
+    public boolean hasFreshTelemetry() {
+        return gatt != null && notifyReady && lastTelemetry != null &&
+                G10Protocol.isFresh(lastTelemetryMs, SystemClock.elapsedRealtime());
+    }
+
+    public boolean canSendMode() {
+        return lastTelemetry != null && commandCharacteristic != null &&
+                G10Protocol.canSendMode(1, lastTelemetry.speedKmh, lastTelemetry.moving,
+                        gatt != null && notifyReady, lastTelemetryMs, lastCommandMs,
+                        SystemClock.elapsedRealtime());
+    }
+
+    public String getRequestedModeLabel() { return modeLabel; }
+
     private String modeLabel = "—";
     private String marker = "";
 
@@ -121,6 +141,7 @@ public class G10BleManager {
     }
 
     public void scanAndConnect() {
+        if (scanning) return;
         if (adapter == null) {
             status("Bluetooth недоступен");
             return;
@@ -204,102 +225,85 @@ public class G10BleManager {
 
     private final BluetoothGattCallback gattCallback = new BluetoothGattCallback() {
         @Override
-        public void onConnectionStateChange(
-                BluetoothGatt bluetoothGatt, int status, int newState) {
-            if (newState == BluetoothProfile.STATE_CONNECTED) {
-                G10BleManager.this.gatt = bluetoothGatt;
-                status("подключено, discovery…");
-                try {
-                    bluetoothGatt.discoverServices();
-                } catch (SecurityException e) {
-                    status("нет permission для discovery");
+        public void onConnectionStateChange(BluetoothGatt deviceGatt, int code, int newState) {
+            main.post(() -> {
+                if (deviceGatt != gatt) return;
+                if (code != BluetoothGatt.GATT_SUCCESS || newState == BluetoothProfile.STATE_DISCONNECTED) {
+                    closeGattOnly();
+                    status(code == BluetoothGatt.GATT_SUCCESS ? "отключено" : "Ошибка BLE: " + code);
+                } else if (newState == BluetoothProfile.STATE_CONNECTED) {
+                    status("подключено, discovery…");
+                    try {
+                        if (!deviceGatt.discoverServices()) status("Не удалось запросить сервисы G10");
+                    } catch (SecurityException e) { status("Нет доступа к Bluetooth"); }
                 }
-            } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                status("отключено");
-                commandCharacteristic = null;
-                notifyCharacteristic = null;
-                lastTelemetry = null;
-            }
+            });
         }
 
         @Override
-        public void onServicesDiscovered(BluetoothGatt bluetoothGatt, int status) {
-            BluetoothGattService fff0 = bluetoothGatt.getService(UUID_FFF0);
-            if (fff0 == null) {
-                status("FFF0 не найден");
-                logGattProfile(bluetoothGatt);
-                return;
-            }
-
-            commandCharacteristic = fff0.getCharacteristic(UUID_FFF1);
-            notifyCharacteristic = fff0.getCharacteristic(UUID_FFF2);
-
-            logGattProfile(bluetoothGatt);
-            gattSummary = buildGattSummary(bluetoothGatt);
-            postGattSummary();
-
-            if (notifyCharacteristic == null) {
-                status("FFF2 не найден");
-                return;
-            }
-
-            status("FFF0/FFF1/FFF2 найдены, включаю Notify…");
-            enableNotifications(bluetoothGatt, notifyCharacteristic);
+        public void onServicesDiscovered(BluetoothGatt deviceGatt, int code) {
+            main.post(() -> {
+                if (deviceGatt != gatt) return;
+                if (code != BluetoothGatt.GATT_SUCCESS) { status("Ошибка поиска сервисов: " + code); return; }
+                BluetoothGattService fff0 = deviceGatt.getService(UUID_FFF0);
+                logGattProfile(deviceGatt);
+                gattSummary = buildGattSummary(deviceGatt);
+                postGattSummary();
+                if (fff0 == null) { status("FFF0 не найден"); return; }
+                commandCharacteristic = fff0.getCharacteristic(UUID_FFF1);
+                notifyCharacteristic = fff0.getCharacteristic(UUID_FFF2);
+                if (notifyCharacteristic == null) { status("FFF2 не найден"); return; }
+                enableNotifications(deviceGatt, notifyCharacteristic);
+            });
         }
 
         @Override
-        public void onCharacteristicChanged(
-                BluetoothGatt bluetoothGatt,
-                BluetoothGattCharacteristic characteristic,
-                byte[] value
-        ) {
-            if (UUID_FFF2.equals(characteristic.getUuid()) && value != null) {
-                handlePacket(value.clone());
-            }
+        public void onDescriptorWrite(BluetoothGatt deviceGatt, BluetoothGattDescriptor descriptor, int code) {
+            main.post(() -> {
+                if (deviceGatt != gatt || !UUID_CCCD.equals(descriptor.getUuid())) return;
+                notifyReady = code == BluetoothGatt.GATT_SUCCESS;
+                status(notifyReady ? "FFF2 Notify активно" : "Ошибка подписки Notify: " + code);
+            });
+        }
+
+        @Override
+        public void onCharacteristicChanged(BluetoothGatt deviceGatt,
+                BluetoothGattCharacteristic characteristic, byte[] value) {
+            receive(deviceGatt, characteristic, value);
         }
 
         @SuppressWarnings("deprecation")
         @Override
-        public void onCharacteristicChanged(
-                BluetoothGatt bluetoothGatt,
-                BluetoothGattCharacteristic characteristic
-        ) {
-            if (UUID_FFF2.equals(characteristic.getUuid())) {
-                byte[] value = characteristic.getValue();
-                if (value != null) handlePacket(value.clone());
-            }
+        public void onCharacteristicChanged(BluetoothGatt deviceGatt,
+                BluetoothGattCharacteristic characteristic) {
+            receive(deviceGatt, characteristic, characteristic.getValue());
         }
     };
 
-    private void enableNotifications(
-            BluetoothGatt bluetoothGatt,
-            BluetoothGattCharacteristic characteristic
-    ) {
+    private void receive(BluetoothGatt deviceGatt, BluetoothGattCharacteristic characteristic, byte[] value) {
+        if (!UUID_FFF2.equals(characteristic.getUuid()) || value == null) return;
+        byte[] packet = value.clone();
+        main.post(() -> { if (deviceGatt == gatt) handlePacket(packet); });
+    }
+
+    @SuppressWarnings("deprecation")
+    private void enableNotifications(BluetoothGatt deviceGatt, BluetoothGattCharacteristic characteristic) {
+        notifyReady = false;
         try {
-            bluetoothGatt.setCharacteristicNotification(characteristic, true);
+            if (!deviceGatt.setCharacteristicNotification(characteristic, true)) {
+                status("Не удалось включить Notify"); return;
+            }
             BluetoothGattDescriptor cccd = characteristic.getDescriptor(UUID_CCCD);
-
-            if (cccd == null) {
-                status("CCCD у FFF2 не найден");
-                return;
-            }
-
+            if (cccd == null) { status("CCCD у FFF2 не найден"); return; }
+            boolean queued;
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                bluetoothGatt.writeDescriptor(
-                        cccd,
-                        BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                );
+                queued = deviceGatt.writeDescriptor(cccd, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE) == 0;
             } else {
-                //noinspection deprecation
                 cccd.setValue(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
-                //noinspection deprecation
-                bluetoothGatt.writeDescriptor(cccd);
+                queued = deviceGatt.writeDescriptor(cccd);
             }
-
-            status("FFF2 Notify активно");
-        } catch (SecurityException e) {
-            status("ошибка permission при Notify");
-        }
+            status(queued ? "Подписка на телеметрию…" : "Запрос Notify отклонён");
+        } catch (SecurityException e) { status("Нет доступа к Notify"); }
     }
 
     private void handlePacket(byte[] packet) {
@@ -309,30 +313,12 @@ public class G10BleManager {
         classify(packet);
         appendRecentHex(packet, changedIndexes);
 
-        if (packet.length < 20) {
-            addLabRowDetailed(
-                    "FFF2_NOTIFY",
-                    UUID_FFF2.toString(),
-                    packet.length,
-                    changedIndexes,
-                    marker,
-                    toHex(packet),
-                    "short_packet"
-            );
-            labUpdated();
-            return;
-        }
-
-        if (allFF(packet)) {
-            addLabRowDetailed(
-                    "FFF2_NOTIFY",
-                    UUID_FFF2.toString(),
-                    packet.length,
-                    changedIndexes,
-                    marker,
-                    toHex(packet),
-                    "all_ff_ignored"
-            );
+        if (!G10Protocol.isTelemetry(packet)) {
+            addLabRowDetailed("FFF2_NOTIFY", UUID_FFF2.toString(), packet.length,
+                    changedIndexes, marker, toHex(packet), "unrecognized_packet;passive_only");
+            // A different stream must not keep the previous stationary reading valid.
+            lastTelemetry = null;
+            lastTelemetryMs = -1;
             labUpdated();
             return;
         }
@@ -348,9 +334,10 @@ public class G10BleManager {
         boolean brake = (flags & 0x08) != 0;
 
         Telemetry t = new Telemetry(
-                speed, raw, voltage, flags, moving, cruise, brake, modeLabel
+                speed, raw, voltage, flags, moving, cruise, brake, "—"
         );
         lastTelemetry = t;
+        lastTelemetryMs = SystemClock.elapsedRealtime();
 
         addLabRowDetailed(
                 "FFF2_NOTIFY",
@@ -365,26 +352,13 @@ public class G10BleManager {
                         ";flags18=0x" + String.format(Locale.US, "%02X", flags)
         );
 
-        main.post(() -> listener.onTelemetry(t));
+        listener.onTelemetry(t);
         labUpdated();
     }
 
     public boolean sendMode(int mode) {
-        if (mode < 1 || mode > 3) return false;
-        if (lastTelemetry == null ||
-                lastTelemetry.speedKmh != 0 ||
-                lastTelemetry.moving ||
-                gatt == null ||
-                commandCharacteristic == null) {
-            return false;
-        }
-
-        byte[] command = new byte[]{
-                (byte) 0xF0,
-                (byte) 0x4C,
-                (byte) 0x03,
-                (byte) mode
-        };
+        if (mode < 1 || mode > 3 || !canSendMode()) return false;
+        byte[] command = G10Protocol.modeCommand(mode);
 
         boolean queued = writeFff1(command);
 
@@ -400,22 +374,9 @@ public class G10BleManager {
         );
 
         if (queued) {
+            lastCommandMs = SystemClock.elapsedRealtime();
             modeLabel = label;
-            Telemetry old = lastTelemetry;
-            if (old != null) {
-                lastTelemetry = new Telemetry(
-                        old.speedKmh,
-                        old.rawSpeed,
-                        old.batteryVoltage,
-                        old.flags18,
-                        old.moving,
-                        old.cruiseActive,
-                        old.brake,
-                        modeLabel
-                );
-                Telemetry updated = lastTelemetry;
-                main.post(() -> listener.onTelemetry(updated));
-            }
+            // Queued write is not device acknowledgement. Never synthesize telemetry.
         }
 
         labUpdated();
@@ -468,14 +429,10 @@ public class G10BleManager {
             family = "OTHER";
         }
 
-        addLabRow(
-                "PROTOCOL_DETECT",
-                UUID_FFF2.toString(),
-                p.length,
-                marker,
-                toHex(p),
-                "family=" + family
-        );
+        if (!family.equals(lastProtocolFamily)) {
+            lastProtocolFamily = family;
+            addLabRow("PROTOCOL_DETECT", UUID_FFF2.toString(), 0, marker, "", "family=" + family);
+        }
     }
 
     public String getProtocolSummary() {
@@ -563,6 +520,7 @@ public class G10BleManager {
         aa55Frames = 0;
         a55aFrames = 0;
         otherFrames = 0;
+        lastProtocolFamily = "";
         droppedLabRows = 0;
         previousNotifyPacket = null;
         rateWindowStartMs = 0;
@@ -720,6 +678,11 @@ public class G10BleManager {
         commandCharacteristic = null;
         notifyCharacteristic = null;
         lastTelemetry = null;
+        lastTelemetryMs = -1;
+        lastCommandMs = -1;
+        notifyReady = false;
+        modeLabel = "—";
+        previousNotifyPacket = null;
     }
 
     public void close() {

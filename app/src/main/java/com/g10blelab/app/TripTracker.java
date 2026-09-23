@@ -9,6 +9,7 @@ import android.location.LocationListener;
 import android.location.LocationManager;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
@@ -121,6 +122,7 @@ public class TripTracker {
     private double reserveVoltage = 44.0;
 
     private G10BleManager.Telemetry telemetry;
+    private long telemetryMs = -1;
     private Location previousTripLocation;
     private TripAnalysisEngine.Result lastAnalysis;
 
@@ -187,6 +189,7 @@ public class TripTracker {
 
     private void handleLocation(Location location) {
         if (location == null) return;
+        expireTelemetry();
 
         TripPoint point = new TripPoint(
                 location.getTime() > 0 ? location.getTime() : System.currentTimeMillis(),
@@ -217,8 +220,15 @@ public class TripTracker {
         listener.onTripStateChanged();
     }
 
+    public void invalidateTelemetry() { telemetry = null; telemetryMs = -1; }
+
+    private void expireTelemetry() {
+        if (!G10Protocol.isFresh(telemetryMs, SystemClock.elapsedRealtime())) invalidateTelemetry();
+    }
+
     public void onTelemetry(G10BleManager.Telemetry t) {
         telemetry = t;
+        telemetryMs = SystemClock.elapsedRealtime();
         endBatteryVoltage = t.batteryVoltage;
         if (t.speedKmh > maxBleSpeed) maxBleSpeed = t.speedKmh;
 
@@ -231,7 +241,8 @@ public class TripTracker {
             }
         } else if (active && !manualTrip) {
             handler.removeCallbacks(autoStopRunnable);
-            handler.postDelayed(autoStopRunnable, AUTO_STOP_MS);
+            handler.postDelayed(autoStopRunnable, Math.max(0, AUTO_STOP_MS -
+                    (System.currentTimeMillis() - lastMovementTime)));
         }
 
         listener.onTripStateChanged();
@@ -259,6 +270,7 @@ public class TripTracker {
         endTime = 0;
         lastMovementTime = startTime;
         distanceMeters = 0;
+        expireTelemetry();
         maxBleSpeed = telemetry != null ? telemetry.speedKmh : 0;
         startBatteryVoltage = telemetry != null ? telemetry.batteryVoltage : 0;
         endBatteryVoltage = startBatteryVoltage;

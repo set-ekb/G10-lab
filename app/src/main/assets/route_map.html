@@ -2,9 +2,9 @@
 <html lang="ru">
 <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-          integrity="sha256-p4NxAoJBhIINfQ3ynh0dD1xT6kYfZ5MZ7E0i2QJw1pM=" crossorigin="">
+          integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
     <style>
         html, body, #map { height: 100%; margin: 0; background: #101820; font-family: sans-serif; }
         #search { position: absolute; z-index: 1000; top: 8px; left: 8px; right: 8px;
@@ -13,12 +13,14 @@
             padding: 11px; color: #f6f8fa; background: rgba(14, 22, 30, .94); font-size: 15px; }
         button { border: 0; border-radius: 10px; padding: 0 15px; font-weight: 700;
             color: #071018; background: #58d68d; }
+        #tools {position:absolute;z-index:1000;top:60px;left:8px;display:flex;gap:6px}
+        #tools button {min-height:44px;background:#263746;color:#fff;font-size:12px}
         #hint { position: absolute; z-index: 1000; left: 8px; right: 8px; bottom: 28px;
             padding: 8px 10px; border-radius: 9px; color: #e8eef4;
             background: rgba(14, 22, 30, .90); font-size: 12px; pointer-events: none; }
         #choices { position: absolute; z-index: 1000; left: 8px; right: 8px; bottom: 72px;
             display: flex; gap: 6px; overflow-x: auto; }
-        #choices button { min-height: 38px; white-space: nowrap; background: #263746; color: #dce7ef; }
+        #choices button { min-height: 44px; white-space: nowrap; background: #263746; color: #dce7ef; }
         #choices button.selected { background: #ffb020; color: #14100a; }
         .leaflet-control-attribution { font-size: 9px !important; }
         .leaflet-container { background: #17232d; }
@@ -31,6 +33,7 @@
            placeholder="Адрес или место назначения">
     <button type="submit">НАЙТИ</button>
 </form>
+<div id="tools"><button id="locate" type="button">МОЯ ПОЗИЦИЯ</button><button id="rebuild" type="button">ОБНОВИТЬ ПУТЬ</button></div>
 <div id="choices"></div>
 <div id="hint">Ждём GPS… Затем нажмите на карту или найдите адрес.</div>
 
@@ -56,6 +59,11 @@
     let destinationLabel = 'Точка на карте';
     let lastGeoRequest = 0;
     let lastRouteRequest = 0;
+    let routeVersion = 0;
+    let searchVersion = 0;
+    let routeRequested = false;
+    let activeRouteController = null;
+
 
     function reportError(message) {
         hint.textContent = message;
@@ -78,12 +86,21 @@
     function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
     async function throttle(kind) {
-        const now = Date.now();
         const last = kind === 'geo' ? lastGeoRequest : lastRouteRequest;
-        const delay = Math.max(0, 1050 - (now - last));
-        if (delay) await sleep(delay);
-        if (kind === 'geo') lastGeoRequest = Date.now();
-        else lastRouteRequest = Date.now();
+        const scheduled = Math.max(Date.now(), last + 1050);
+        if (kind === 'geo') lastGeoRequest = scheduled;
+        else lastRouteRequest = scheduled;
+        const delay = scheduled - Date.now();
+        if (delay > 0) await sleep(delay);
+    }
+
+    async function fetchJson(url, controller = new AbortController()) {
+        const timer = setTimeout(() => controller.abort(), 12000);
+        try {
+            const response = await fetch(url, { signal: controller.signal });
+            if (!response.ok) throw new Error('service unavailable');
+            return await response.json();
+        } finally { clearTimeout(timer); }
     }
 
     function setMarker(previous, latlng, color) {
@@ -121,7 +138,9 @@
 
     function drawRoutes(data) {
         clearRoutes();
-        routes = (data.routes || []).slice(0, 3);
+        routes = (data.routes || []).filter(route => Number.isFinite(route.distance) &&
+            route.distance > 0 && route.distance <= 500000 && Number.isFinite(route.duration) &&
+            route.geometry && Array.isArray(route.geometry.coordinates)).slice(0, 3);
         if (!routes.length) throw new Error('Маршрут не найден');
 
         routes.forEach((route, index) => {
@@ -146,66 +165,74 @@
 
     async function requestRoute() {
         if (!start || !destination) return;
-        hint.textContent = 'Строим варианты маршрута…';
+        const version = ++routeVersion;
+        if (activeRouteController) activeRouteController.abort();
+        const controller = new AbortController();
+        activeRouteController = controller;
+        routeRequested = true;
+        const target = destination;
+        const label = destinationLabel;
+        const origin = start;
+        hint.textContent = 'Строим велосипедный маршрут…';
         clearRoutes();
-
-        const coords = `${start.lng},${start.lat};${destination.lng},${destination.lat}`;
-        const bikeUrl = 'https://routing.openstreetmap.de/routed-bike/route/v1/driving/' +
+        if (bridge && bridge.onRouteCleared) bridge.onRouteCleared(label);
+        const coords = `${origin.lng},${origin.lat};${target.lng},${target.lat}`;
+        const url = 'https://routing.openstreetmap.de/routed-bike/route/v1/driving/' +
             `${coords}?alternatives=true&overview=full&geometries=geojson&steps=false`;
-        const roadFallback = 'https://router.project-osrm.org/route/v1/driving/' +
-            `${coords}?alternatives=true&overview=full&geometries=geojson&steps=false`;
-
         try {
             await throttle('route');
-            let response = await fetch(bikeUrl);
-            if (!response.ok) throw new Error('bike router unavailable');
-            drawRoutes(await response.json());
-        } catch (bikeError) {
-            try {
-                await throttle('route');
-                const response = await fetch(roadFallback);
-                if (!response.ok) throw new Error('road router unavailable');
-                drawRoutes(await response.json());
-                hint.textContent += ' Использован запасной дорожный расчёт.';
-            } catch (roadError) {
-                reportError('Не удалось построить маршрут. Введите километраж вручную.');
-            }
+            if (version !== routeVersion) return;
+            const data = await fetchJson(url, controller);
+            if (version !== routeVersion) return;
+            drawRoutes(data);
+        } catch (error) {
+            if (version === routeVersion) reportError('Маршрут недоступен. Нажмите «Обновить путь» или введите километраж вручную.');
         }
     }
 
     function setDestination(lat, lng, label) {
+        if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) return;
+        ++routeVersion;
+        if (activeRouteController) activeRouteController.abort();
+        clearRoutes();
+        routeRequested = false;
         destination = L.latLng(lat, lng);
         destinationLabel = label || 'Точка на карте';
         destinationMarker = setMarker(destinationMarker, destination, '#ff9f1c');
-        requestRoute();
+        if (bridge && bridge.onRouteCleared) bridge.onRouteCleared(destinationLabel);
+        if (start) requestRoute();
+        else hint.textContent = 'Точка выбрана. Ждём GPS; километраж можно ввести вручную.';
     }
 
-    map.on('click', event => setDestination(event.latlng.lat, event.latlng.lng, 'Точка на карте'));
+    map.on('click', event => { ++searchVersion; setDestination(event.latlng.lat, event.latlng.lng, 'Точка на карте'); });
 
     document.getElementById('search').addEventListener('submit', async event => {
         event.preventDefault();
         const query = input.value.trim();
         if (!query) return;
+        const version = ++searchVersion;
         hint.textContent = 'Ищем адрес…';
 
         const key = 'g10-geocode:' + query.toLowerCase();
         try {
             let item = null;
-            const cached = localStorage.getItem(key);
+            let cached = null;
+            try { cached = localStorage.getItem(key); } catch (ignored) { }
             if (cached) item = JSON.parse(cached);
             if (!item) {
                 await throttle('geo');
                 const url = 'https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1' +
                     '&accept-language=ru&q=' + encodeURIComponent(query);
-                const response = await fetch(url);
-                if (!response.ok) throw new Error('search unavailable');
-                const found = await response.json();
+                if (version !== searchVersion) return;
+                const found = await fetchJson(url);
                 if (!found.length) throw new Error('not found');
                 item = found[0];
-                localStorage.setItem(key, JSON.stringify(item));
+                try { localStorage.setItem(key, JSON.stringify(item)); } catch (ignored) { }
             }
+            if (version !== searchVersion) return;
             setDestination(Number(item.lat), Number(item.lon), item.display_name || query);
         } catch (error) {
+            if (version !== searchVersion) return;
             reportError('Адрес не найден. Уточните запрос или нажмите точку на карте.');
         }
     });
@@ -219,7 +246,17 @@
             map.setView(start, 15);
             hint.textContent = 'Нажмите точку назначения на карте или найдите адрес.';
         }
-        if (destination && !routes.length) requestRoute();
+        if (destination && !routeRequested) requestRoute();
+    };
+
+    window.g10MapResize = () => setTimeout(() => map.invalidateSize(), 50);
+    document.getElementById('locate').onclick = () => {
+        if (start) map.setView(start, 15);
+        else hint.textContent = 'Нет GPS. Разрешите геолокацию и дождитесь координат.';
+    };
+    document.getElementById('rebuild').onclick = () => {
+        if (!start || !destination) hint.textContent = 'Нужны GPS и точка назначения.';
+        else requestRoute();
     };
 
     if (bridge && bridge.onMapReady) bridge.onMapReady();
