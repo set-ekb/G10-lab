@@ -1,5 +1,17 @@
 # G10 Companion — agent instructions
 
+## Global control plane — AI Workspace Protocol 2.0
+
+Before project work, prefer the AI Workspace Launcher or otherwise load the canonical global context from Google Drive:
+- Global AGENTS: https://docs.google.com/document/d/1n4TBLBpyX3DlfBmY3Yc4K7JDZDc0nYP5QAjouTCyzaA/edit
+- Index: https://docs.google.com/document/d/1N1dlTKxp_NFTxoKAXtrdJ5TWYOsk8WwzTVEkxs_xsho/edit
+- Coordination protocol: https://docs.google.com/document/d/1oQ1pw0DmKLYpcDtOO1UDiGoe1t_bSi6wkheG0tUIAIQ/edit
+- AI registry: https://docs.google.com/document/d/17T6I1JXQHfqN-F-GbRqMqxAlFY7E14YjcViRCZ3XKo8/edit
+
+The global control plane defines identity, access, coordination, handshake and conflict rules. This repository is the project plane. Project rules may narrow but never broaden global rights.
+
+If the global protocol cannot be verified, do not perform deploy, destructive operations, or writes to shared global memory. Do not elevate permissions by inference.
+
 Цель: минимизировать расход контекста и Work/Codex при разработке, не ухудшая качество и безопасность изменений.
 
 ## Обязательный порядок чтения

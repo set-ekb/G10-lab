@@ -4,6 +4,12 @@ Short-lived transfer state between AI agents. Keep this file concise.
 
 ## Current handoff
 
+- Protocol version: 2.0
+- Task ID: none
+- Claimed by: none
+- Claimed at: none
+- Task status: OPEN
+
 - Status: READY
 - Task: none
 - Last agent: none
@@ -14,6 +20,8 @@ Short-lived transfer state between AI agents. Keep this file concise.
 - Next action: read `AI_CONTEXT.md`, `AGENTS.md`, `docs/PROJECT_STATE.md` and `docs/NEXT_BUILD.md`.
 
 ## Handoff format
+
+Include protocol version, task ID, claimed_by, claimed_at and task_status (OPEN / CLAIMED / BLOCKED / REVIEW / DONE).
 
 After a meaningful agent iteration, replace the section above with:
 - Status: READY / BLOCKED / REVIEW
